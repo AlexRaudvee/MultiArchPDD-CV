@@ -25,7 +25,7 @@ pdd = PDD(model_fn=model_fn,
           image_shape=(1, 28, 28),
           num_classes=10,
           synthetic_size=100,  # e.g. 10 per class
-          P=5, K=100, T=30,
+          P=5, K=400, T=50,
           lr_model=0.01, lr_syn_data=0.1)
 
 # 4.1) run distillation
@@ -48,5 +48,5 @@ for i, X in enumerate(X_syn, start=1):
     print(f"Saved 10 samples from stage {i} → assets/viz_synthetic/synthetic_stage_{i:02d}.png")
 
 # 5) save distilled set
-torch.save({'X': X_syn, 'Y': Y_syn}, 'distilled_mnist.pt')
+torch.save({'X': X_syn, 'Y': Y_syn}, 'data/Distilled_MNIST/distilled_mnist.pt')
 

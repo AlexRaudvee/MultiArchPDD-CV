@@ -79,12 +79,12 @@ class PDD:
                 dynamic_ncols=True
             ):
                 # build support S ∪ {(X^{k−1},Y^{k−1})}
-                # if S_X:
-                #     X_sup = torch.cat([*S_X, X.detach()], dim=0)
-                #     Y_sup = torch.cat([*S_Y, F.softmax(Y.detach(), dim=1)], dim=0)
-                # else:
-                #     X_sup = X.detach()
-                #     Y_sup = F.softmax(Y.detach(), dim=1)
+                if S_X:
+                    X_sup = torch.cat([*S_X, X.detach()], dim=0)
+                    Y_sup = torch.cat([*S_Y, F.softmax(Y.detach(), dim=1)], dim=0)
+                else:
+                    X_sup = X.detach()
+                    Y_sup = F.softmax(Y.detach(), dim=1)
 
                 # 6–8: fine-tune model for T steps on support
                 model = self.model_fn().to(self.device)
@@ -92,8 +92,8 @@ class PDD:
                 fast_weights = OrderedDict(model.named_parameters())
 
                 for t in range(1, self.T + 1):
-                    logits = functional_call(model, fast_weights, X)
-                    loss_sup = -(Y * F.log_softmax(logits, dim=1)).sum(dim=1).mean()
+                    logits = functional_call(model, fast_weights, X_sup)
+                    loss_sup = -(Y_sup * F.log_softmax(logits, dim=1)).sum(dim=1).mean()
                     grads = torch.autograd.grad(loss_sup, fast_weights.values(), create_graph=True)
                     fast_weights = OrderedDict(
                         (n, p - self.eta * g) for (n, p), g in zip(fast_weights.items(), grads)
