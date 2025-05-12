@@ -8,21 +8,35 @@ from torch.hub import load_state_dict_from_url
 class ConvNet(nn.Module):
     def __init__(self, in_channels=3, num_classes=10):
         super().__init__()
+        # Three conv blocks: 32 -> 64 -> 128 channels
         self.features = nn.Sequential(
-            nn.Conv2d(in_channels, 32, 3, padding=1), nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(),
-            nn.MaxPool2d(2),
+            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),  # spatial /2
+
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),  # spatial /4
+
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),  # spatial /8
         )
+
+        # Determine final spatial size: for CIFAR (32x32) -> 4x4, for MNIST (28x28) -> 3x3
+        final_spatial = 4 if in_channels == 3 else 3
+        hidden_dim = 128 * final_spatial * final_spatial
+
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(64 * (8 if in_channels==3 else 7)**2, 128),
-            nn.ReLU(),
+            nn.Linear(hidden_dim, 128),
+            nn.ReLU(inplace=True),
             nn.Linear(128, num_classes),
         )
 
     def forward(self, x):
-        return self.classifier(self.features(x))
+        x = self.features(x)
+        return self.classifier(x)
 
 
 # ResNet-10: same as ResNet18 but with one block per layer
