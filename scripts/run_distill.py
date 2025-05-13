@@ -27,8 +27,8 @@ pdd = PDD(model_fn=model_fn,
           real_loader=loader_mnist,
           image_shape=(1, 28, 28),
           num_classes=10,
-          synthetic_size=10,  # e.g. 10 per class
-          P=1, K=10, T=20,
+          synthetic_size=100,  # e.g. 10 per class
+          P=5, K=200, T=20,
           lr_model=1e-4, lr_syn_data=1e-3, 
           syn_optimizer="adam", 
           inner_optimizer="adam")
@@ -38,7 +38,7 @@ X_syn, Y_syn = pdd.distill()
 print("     - Distillation is Finished")
 
 # Plot the losses
-pdd.plot_meta_loss()
+pdd.plot_meta_losses()
 
 # 5) save distilled set ———
 os.makedirs('data/Distilled_MNIST', exist_ok=True)

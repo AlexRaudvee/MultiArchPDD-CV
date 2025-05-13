@@ -71,7 +71,7 @@ class PDD:
         self.device          = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # storage for monitoring
-        self.meta_loss_history = []  # list of lists per stage
+        self.meta_loss_history = {}  # list of lists per stage
 
     def distill(self):
         # Initialize distilled support sets
@@ -84,15 +84,17 @@ class PDD:
         for stage in range(1, self.P + 1):
             # Initialize synthetic tensors
             X = nn.Parameter(torch.rand(self.synthetic_size, *self.image_shape, device=self.device))
-            Y = nn.Parameter(torch.rand(self.synthetic_size, self.num_classes, device=self.device))
-
+            Y = torch.arange(self.num_classes, device=self.device).repeat_interleave(self.synthetic_size // self.num_classes)
+            assert Y.shape[0] == self.synthetic_size
+            
             # Synthetic optimizer
             if self.syn_optimizer == 'sgd':
-                syn_opt = SGD([X, Y], lr=self.lr_syn_data, momentum=self.syn_momentum)
+                syn_opt = SGD([X], lr=self.lr_syn_data, momentum=self.syn_momentum)
             else:
-                syn_opt = Adam([X, Y], lr=self.lr_syn_data)
+                syn_opt = Adam([X], lr=self.lr_syn_data)
 
             # K refinement iterations
+            self.meta_loss_stage_history = []
             for k in trange(
                 1, self.K + 1,
                 desc=f"[Stage {stage}/{self.P}] refine syn",
@@ -102,10 +104,10 @@ class PDD:
                 # Build support: S union current synthetic
                 if S_X:
                     X_sup = torch.cat([*S_X, X], dim=0)
-                    Y_sup = torch.cat([*S_Y, F.softmax(Y, dim=1)], dim=0)
+                    Y_sup = torch.cat([*S_Y, Y], dim=0)
                 else:
                     X_sup = X
-                    Y_sup = F.softmax(Y, dim=1)
+                    Y_sup = Y
 
                 # Inner-loop: fine-tune student on synthetic data with differentiable optimizer
                 model = self.model_fn().to(self.device)
@@ -123,7 +125,7 @@ class PDD:
                 with higher.innerloop_ctx(model, base_opt, copy_initial_weights=True) as (fmodel, diffopt):
                     for t in range(self.T):
                         logits = fmodel(X_sup)
-                        loss_sup = -(Y_sup * F.log_softmax(logits, dim=1)).sum(dim=1).mean()
+                        loss_sup = F.cross_entropy(logits, Y_sup)
                         diffopt.step(loss_sup)
 
                     # Meta-evaluation on real data
@@ -136,14 +138,21 @@ class PDD:
                     logits_real = fmodel(x_real)
                     meta_loss = F.cross_entropy(logits_real, y_real)
 
+                    # append the losses into the history
+                    self.meta_loss_stage_history.append(float(meta_loss.detach().numpy()))
+
                 # Meta-step: update synthetic data
                 syn_opt.zero_grad()
                 meta_loss.backward()
                 syn_opt.step()
 
+            # store the metalosses 
+            self.meta_loss_history[f"{stage}"] = self.meta_loss_stage_history
+            
             # Store final synthetic batch for this stage
             S_X.append(X.detach().clone())
-            S_Y.append(F.softmax(Y.detach(), dim=1).clone())
+            S_Y.append(Y.detach().clone())
+
 
             # Re-train model on full distilled support
             model = self.model_fn().to(self.device)
@@ -152,7 +161,7 @@ class PDD:
                 X_all = torch.cat(S_X, dim=0)
                 Y_all = torch.cat(S_Y, dim=0)
                 logits_all = model(X_all)
-                loss_all = -(Y_all * F.log_softmax(logits_all, dim=1)).sum(dim=1).mean()
+                loss_all = F.cross_entropy(logits_all, Y_all)
                 model.zero_grad()
                 loss_all.backward()
                 for p in model.parameters():
@@ -162,17 +171,29 @@ class PDD:
             theta0 = model.state_dict()
 
         return S_X, S_Y
+        
+    def plot_meta_losses(self):
+        """
+        Plot meta-loss trajectories for each distillation stage.
 
-    def plot_meta_loss(self):
+        Args:
+            meta_losses_dict (dict[str, list[float]]):
+                keys are stage identifiers (e.g. "1", "2", …),
+                values are lists of meta-losses per refinement iteration.
         """
-        Plot the meta-loss curves across stages.
-        """
+        import os 
+        os.makedirs("assets", exist_ok=True)
+        
         import matplotlib.pyplot as plt
-        plt.figure()
-        for i, losses in enumerate(self.meta_loss_history, start=1):
-            plt.plot(losses, label=f"Stage {i}")
+        plt.figure(figsize=(8,5))
+        # Sort by stage number
+        for stage, losses in sorted(self.meta_loss_history.items(), key=lambda x: int(x[0])):
+            iterations = range(1, len(losses) + 1)
+            plt.plot(iterations, losses, marker='o', label=f"Stage {stage}")
         plt.xlabel("Refinement Iteration k")
         plt.ylabel("Meta-Loss")
-        plt.title("Meta-Loss during Synthetic Refinement")
+        plt.title("Meta-Loss Trajectories Across Stages")
         plt.legend()
-        plt.show()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig("assets/meta-loss-curve.png")
