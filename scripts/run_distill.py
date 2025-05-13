@@ -27,8 +27,8 @@ pdd = PDD(model_fn=model_fn,
           real_loader=loader_mnist,
           image_shape=(1, 28, 28),
           num_classes=10,
-          synthetic_size=100,  # e.g. 10 per class
-          P=5, K=200, T=30,
+          synthetic_size=10,  # e.g. 10 per class
+          P=1, K=1, T=1,
           lr_model=1e-4, lr_syn_data=1e-3, 
           syn_optimizer="adam", 
           inner_optimizer="momentum")
@@ -37,16 +37,17 @@ pdd = PDD(model_fn=model_fn,
 X_syn, Y_syn = pdd.distill()
 print("     - Distillation is Finished")
 
+os.makedirs("data/checkpoints", exist_ok=True)
+os.makedirs('data/Distilled_MNIST', exist_ok=True)
+
 # Plot the losses
 pdd.plot_meta_losses()
 
-# 5) save distilled set ———
-os.makedirs('data/Distilled_MNIST', exist_ok=True)
-torch.save({'X': X_syn, 'Y': Y_syn},
-           'data/Distilled_MNIST/distilled_mnist.pt')
-print("Saved distilled dataset → data/Distilled_MNIST/distilled_mnist.pt")
+# save results 
+pdd.save_model(filepath="data/checkpoints/test.pth")
+pdd.save_distilled(filepath="data/Distilled_MNIST/distilled_mnist.pt")
 
-# 6) visualize & save 10 examples per P‐subset from the saved file ———
+# 5) visualize & save 10 examples per P‐subset from the saved file ———
 loaded = torch.load('data/Distilled_MNIST/distilled_mnist.pt')
 X_loaded = loaded['X']   # this is your list of tensors S_X
 

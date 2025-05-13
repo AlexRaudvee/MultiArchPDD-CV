@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import higher
 from torch.optim import SGD, Adam
 from tqdm.auto import trange
 from torch.func import functional_call
