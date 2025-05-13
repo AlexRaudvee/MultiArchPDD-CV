@@ -28,10 +28,10 @@ pdd = PDD(model_fn=model_fn,
           image_shape=(1, 28, 28),
           num_classes=10,
           synthetic_size=100,  # e.g. 10 per class
-          P=5, K=200, T=20,
+          P=5, K=200, T=30,
           lr_model=1e-4, lr_syn_data=1e-3, 
           syn_optimizer="adam", 
-          inner_optimizer="adam")
+          inner_optimizer="momentum")
 
 # 4) run distillation
 X_syn, Y_syn = pdd.distill()

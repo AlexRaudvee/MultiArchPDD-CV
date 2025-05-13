@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import higher
 from torch.optim import SGD, Adam
 from tqdm.auto import trange
+from torch.func import functional_call
 
 
 class PDD:
@@ -25,7 +26,7 @@ class PDD:
         lr_syn_data:     learning rate for synthetic updates (meta-step)
         syn_optimizer:   'adam' or 'sgd' for updating synthetic variables
         syn_momentum:    momentum for synthetic SGD optimizer
-        inner_optimizer: 'sgd', 'momentum', or 'adam' for student inner-loop
+        inner_optimizer: 'sgd', 'momentum' for inner-loop learning
         inner_momentum:  momentum for student SGD with momentum
         inner_betas:     tuple (beta1, beta2) for student Adam optimizer
         inner_eps:       epsilon for student Adam optimizer
@@ -72,6 +73,7 @@ class PDD:
 
         # storage for monitoring
         self.meta_loss_history = {}  # list of lists per stage
+        self.inner_lrs  = nn.Parameter(torch.ones(self.T, device=self.device) * lr_model)
 
     def distill(self):
         # Initialize distilled support sets
@@ -88,10 +90,14 @@ class PDD:
             assert Y.shape[0] == self.synthetic_size
             
             # Synthetic optimizer
+            opt_params = [X, self.inner_lrs]
             if self.syn_optimizer == 'sgd':
-                syn_opt = SGD([X], lr=self.lr_syn_data, momentum=self.syn_momentum)
+                syn_opt = SGD(opt_params,
+                              lr=self.lr_syn_data,
+                              momentum=self.syn_momentum)
             else:
-                syn_opt = Adam([X], lr=self.lr_syn_data)
+                syn_opt = Adam(opt_params,
+                               lr=self.lr_syn_data)
 
             # K refinement iterations
             self.meta_loss_stage_history = []
@@ -109,34 +115,46 @@ class PDD:
                     X_sup = X
                     Y_sup = Y
 
-                # Inner-loop: fine-tune student on synthetic data with differentiable optimizer
-                model = self.model_fn().to(self.device)
-                model.load_state_dict(theta0)
 
-                # choose inner optimizer
-                if self.inner_optimizer == 'sgd':
-                    base_opt = SGD(model.parameters(), lr=self.lr_model)
-                elif self.inner_optimizer == 'momentum':
-                    base_opt = SGD(model.parameters(), lr=self.lr_model, momentum=self.inner_momentum)
-                else:
-                    beta1, beta2 = self.inner_betas
-                    base_opt = Adam(model.parameters(), lr=self.lr_model, betas=(beta1, beta2), eps=self.inner_eps)
+                    # 1) instantiate & freeze student params
+                    model = self.model_fn().to(self.device)
+                    model.load_state_dict(theta0)
+                    params = {name: p for name,p in model.named_parameters()}
 
-                with higher.innerloop_ctx(model, base_opt, copy_initial_weights=True) as (fmodel, diffopt):
+                    # 2) optional momentum buffers
+                    if self.inner_optimizer == "momentum":
+                        velocities = {n: torch.zeros_like(p) for n,p in params.items()}
+
+                    # 3) unroll T gradient steps with per-step lr
                     for t in range(self.T):
-                        logits = fmodel(X_sup)
+                        logits   = functional_call(model, params, (X_sup,))
                         loss_sup = F.cross_entropy(logits, Y_sup)
-                        diffopt.step(loss_sup)
+                        grads    = torch.autograd.grad(loss_sup,
+                                                       params.values(),
+                                                       create_graph=True)
 
-                    # Meta-evaluation on real data
+                        # build next‐step params dict
+                        alpha_t = self.inner_lrs[t]
+                        new_params = {}
+                        for (name,p), g in zip(params.items(), grads):
+                            if self.inner_optimizer == "sgd":
+                                new_params[name] = p - alpha_t * g
+                            else:  # momentum
+                                v_new = (self.inner_momentum * velocities[name]
+                                         + (1-self.inner_momentum) * g)
+                                velocities[name] = v_new
+                                new_params[name] = p - alpha_t * v_new
+                        params = new_params
+
+                    # 4) meta‐evaluation on real data with final params
                     try:
                         x_real, y_real = next(real_iter)
                     except StopIteration:
                         real_iter = iter(self.real_loader)
                         x_real, y_real = next(real_iter)
                     x_real, y_real = x_real.to(self.device), y_real.to(self.device)
-                    logits_real = fmodel(x_real)
-                    meta_loss = F.cross_entropy(logits_real, y_real)
+                    logits_real = functional_call(model, params, (x_real,))
+                    meta_loss   = F.cross_entropy(logits_real, y_real)
 
                     # append the losses into the history
                     self.meta_loss_stage_history.append(float(meta_loss.detach().numpy()))
@@ -146,6 +164,10 @@ class PDD:
                 meta_loss.backward()
                 syn_opt.step()
 
+                # clamp for better representation on visuals 
+                with torch.no_grad():
+                    X.data.clamp_(0,1)
+                    
             # store the metalosses 
             self.meta_loss_history[f"{stage}"] = self.meta_loss_stage_history
             
