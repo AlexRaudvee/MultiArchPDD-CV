@@ -6,6 +6,7 @@ from torch.optim import SGD, Adam
 from tqdm.auto import trange
 from torch.func import functional_call
 
+# torch.autograd.set_detect_anomaly(True)
 
 class PDD:
     """
@@ -107,64 +108,59 @@ class PDD:
                 leave=False,
                 dynamic_ncols=True
             ):
-                # Build support: S union current synthetic
+                # 1) Build support: S union current synthetic
                 if S_X:
                     X_sup = torch.cat([*S_X, X], dim=0)
                     Y_sup = torch.cat([*S_Y, Y], dim=0)
                 else:
-                    X_sup = X
-                    Y_sup = Y
+                    X_sup, Y_sup = X, Y
 
+                # 2) Instantiate student & grab its param dict
+                model = self.model_fn().to(self.device)
+                model.load_state_dict(theta0)
+                params = {name: p for name,p in model.named_parameters()}
 
-                    # 1) instantiate & freeze student params
-                    model = self.model_fn().to(self.device)
-                    model.load_state_dict(theta0)
-                    params = {name: p for name,p in model.named_parameters()}
+                # 3) (Re-)initialize momentum buffers each iter if needed
+                if self.inner_optimizer == "momentum":
+                    velocities = {n: torch.zeros_like(p) for n,p in params.items()}
 
-                    # 2) optional momentum buffers
-                    if self.inner_optimizer == "momentum":
-                        velocities = {n: torch.zeros_like(p) for n,p in params.items()}
+                # 4) Unroll T inner‐loop steps with meta‐LR schedule
+                for t in range(self.T):
+                    logits   = functional_call(model, params, (X_sup,))
+                    loss_sup = F.cross_entropy(logits, Y_sup)
+                    grads    = torch.autograd.grad(
+                        loss_sup, params.values(), create_graph=True
+                    )
 
-                    # 3) unroll T gradient steps with per-step lr
-                    for t in range(self.T):
-                        logits   = functional_call(model, params, (X_sup,))
-                        loss_sup = F.cross_entropy(logits, Y_sup)
-                        grads    = torch.autograd.grad(loss_sup,
-                                                       params.values(),
-                                                       create_graph=True)
+                    alpha_t = self.inner_lrs[t]
+                    new_params = {}
+                    for (name,p), g in zip(params.items(), grads):
+                        if self.inner_optimizer == "sgd":
+                            new_params[name] = p - alpha_t * g
+                        else:  # momentum
+                            v_new = (self.inner_momentum * velocities[name]
+                                     + (1-self.inner_momentum) * g)
+                            velocities[name]   = v_new
+                            new_params[name]   = p - alpha_t * v_new
+                    params = new_params
 
-                        # build next‐step params dict
-                        alpha_t = self.inner_lrs[t]
-                        new_params = {}
-                        for (name,p), g in zip(params.items(), grads):
-                            if self.inner_optimizer == "sgd":
-                                new_params[name] = p - alpha_t * g
-                            else:  # momentum
-                                v_new = (self.inner_momentum * velocities[name]
-                                         + (1-self.inner_momentum) * g)
-                                velocities[name] = v_new
-                                new_params[name] = p - alpha_t * v_new
-                        params = new_params
+                # 5) Meta-evaluate on real data (always recompute)
+                try:
+                    x_real, y_real = next(real_iter)
+                except StopIteration:
+                    real_iter = iter(self.real_loader)
+                    x_real, y_real = next(real_iter)
+                x_real, y_real = x_real.to(self.device), y_real.to(self.device)
+                logits_real = functional_call(model, params, (x_real,))
+                meta_loss   = F.cross_entropy(logits_real, y_real)
 
-                    # 4) meta‐evaluation on real data with final params
-                    try:
-                        x_real, y_real = next(real_iter)
-                    except StopIteration:
-                        real_iter = iter(self.real_loader)
-                        x_real, y_real = next(real_iter)
-                    x_real, y_real = x_real.to(self.device), y_real.to(self.device)
-                    logits_real = functional_call(model, params, (x_real,))
-                    meta_loss   = F.cross_entropy(logits_real, y_real)
-
-                    # append the losses into the history
-                    self.meta_loss_stage_history.append(float(meta_loss.detach().numpy()))
-
-                # Meta-step: update synthetic data
+                # 6) Record & do exactly one backward per fresh graph
+                self.meta_loss_stage_history.append(meta_loss.item())
                 syn_opt.zero_grad()
                 meta_loss.backward()
                 syn_opt.step()
 
-                # clamp for better representation on visuals 
+                # 7) Clamp X in no_grad (harmless now)
                 with torch.no_grad():
                     X.data.clamp_(0,1)
                     
