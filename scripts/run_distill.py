@@ -27,8 +27,8 @@ pdd = PDD(model_fn=model_fn,
           real_loader=loader_mnist,
           image_shape=(1, 28, 28),
           num_classes=10,
-          synthetic_size=10,  # e.g. 10 per class
-          P=1, K=1, T=1,
+          synthetic_size=100,  # e.g. 10 per class
+          P=9, K=200, T=40,
           lr_model=1e-4, lr_syn_data=1e-3, 
           syn_optimizer="adam", 
           inner_optimizer="momentum")
