@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from torch.optim import SGD, Adam
 from tqdm.auto import trange
 from torch.func import functional_call
@@ -186,9 +187,51 @@ class PDD:
 
             # Update theta0 to the newly trained model
             theta0 = model.state_dict()
-
+            
+        self.final_model = theta0
+        self.S_X, self.S_Y = S_X, S_Y
+        
         return S_X, S_Y
         
+    def save_model(self, filepath: str) -> None:
+        """
+        Save a PyTorch model’s state_dict to disk.
+
+        Args:
+            model    – the nn.Module you want to checkpoint
+            filepath – where to write the .pth file (e.g. 'checkpoints/student.pth')
+        """
+        import os
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        torch.save(self.final_model, filepath)
+        print("[Distillator]:") 
+        print(f"     - model saved to {filepath}")
+
+    def save_distilled(self, filepath: str) -> None:
+        """
+        Save the distilled dataset (S_X, S_Y) and meta-loss history.
+
+        Call this *after* distill(), e.g.:
+
+            X_synth, Y_synth = pdd.distill()
+            pdd.save_distilled('results/distilled.pth')
+
+        Args:
+            filepath – where to write the .pth file
+        """
+        import os
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        # make sure distill() has stored these
+        data = {
+            'X': self.S_X,                    # list of tensors, each [n, C, H, W]
+            'Y': self.S_Y,                    # list of tensors, each [n]
+            'meta_loss_history': self.meta_loss_history,
+            'inner_lrs':       self.inner_lrs.detach().cpu(),
+        }
+        torch.save(data, filepath)
+        print("[Distillator]:") 
+        print(f"     - distilled dataset & history saved to {filepath}")
+    
     def plot_meta_losses(self):
         """
         Plot meta-loss trajectories for each distillation stage.
@@ -198,11 +241,9 @@ class PDD:
                 keys are stage identifiers (e.g. "1", "2", …),
                 values are lists of meta-losses per refinement iteration.
         """
-        import os 
-        os.makedirs("assets", exist_ok=True)
-        
         import matplotlib.pyplot as plt
         plt.figure(figsize=(8,5))
+        
         # Sort by stage number
         for stage, losses in sorted(self.meta_loss_history.items(), key=lambda x: int(x[0])):
             iterations = range(1, len(losses) + 1)

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import higher
+
 from torch.optim import SGD, Adam
 from tqdm.auto import trange
 from torch.func import functional_call
@@ -241,11 +241,9 @@ class PDD:
                 keys are stage identifiers (e.g. "1", "2", …),
                 values are lists of meta-losses per refinement iteration.
         """
-        import os 
-        os.makedirs("assets", exist_ok=True)
-        
         import matplotlib.pyplot as plt
         plt.figure(figsize=(8,5))
+        
         # Sort by stage number
         for stage, losses in sorted(self.meta_loss_history.items(), key=lambda x: int(x[0])):
             iterations = range(1, len(losses) + 1)

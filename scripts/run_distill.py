@@ -4,6 +4,8 @@ import os
 import argparse
 import torch
 
+from PIL import Image
+
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.datasets import MNIST, CIFAR10
@@ -118,15 +120,20 @@ def main():
     loaded = torch.load(distilled_path)
     X_loaded = loaded['X']   # this is your list of tensors S_X
 
+    to_pil = transforms.ToPILImage()
     os.makedirs('assets/viz_synthetic', exist_ok=True)
     for i, X in enumerate(X_loaded, start=1):
-        # take first 10 examples from the i-th synthetic subset
         imgs = X[:10]
-        # create a 2×5 grid
         grid = make_grid(imgs, nrow=5, normalize=True, scale_each=True)
-        # save grid as PNG
-        save_image(grid, f'assets/viz_synthetic/synthetic_stage_{i:02d}.png')
-        print(f"     - Plotted & saved stage {i} → assets/viz_synthetic/synthetic_stage_{i:02d}.png")
+
+        # convert to PIL and resize
+        pil_img = to_pil(grid)
+        # target size in pixels (e.g. 8×5 inches @100dpi → 800×500px)
+        pil_img = pil_img.resize((800, 500), resample=Image.NEAREST)
+
+        out_path = f'assets/viz_synthetic/synthetic_stage_{i:02d}.png'
+        pil_img.save(out_path)
+        print(f"     - Plotted & saved stage {i} → {out_path}")
 
 if __name__ == "__main__":
     main()
