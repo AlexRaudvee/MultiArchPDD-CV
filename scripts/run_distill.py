@@ -11,7 +11,7 @@ from torchvision import transforms
 from torchvision.datasets import MNIST, CIFAR10
 
 from models.Model import ConvNet, ResNet10, ResNet18, VGG11
-from torchvision.utils import make_grid, save_image
+from torchvision.utils import make_grid
 from distillation.PDD import PDD
 
 
@@ -74,6 +74,7 @@ def main():
     print("     - Loading...")
     os.makedirs(args.out_dir,  exist_ok=True)
     os.makedirs(args.ckpt_dir, exist_ok=True)
+    os.makedirs("assets/viz_synthetic", exist_ok=True)
     loader, img_shape, n_cls = get_data_loader(args.dataset, args.data_dir, args.batch_size)
     print("     - Done.")
     
@@ -121,7 +122,6 @@ def main():
     X_loaded = loaded['X']   # this is your list of tensors S_X
 
     to_pil = transforms.ToPILImage()
-    os.makedirs('assets/viz_synthetic', exist_ok=True)
     for i, X in enumerate(X_loaded, start=1):
         imgs = X[:10]
         grid = make_grid(imgs, nrow=5, normalize=True, scale_each=True)
