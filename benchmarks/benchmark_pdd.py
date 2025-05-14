@@ -1,69 +1,114 @@
+#!/usr/bin/env python3
+import os
+import argparse
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision import transforms
-from torchvision.datasets import MNIST
-from models.Model import ConvNet
+from torchvision.datasets import MNIST, CIFAR10
+from models.Model import ConvNet, ResNet10, ResNet18, VGG11
 
-# ——— Config ———
-CKPT_PATH        = "data/Distilled/mm-match_mnist_convnet.pt"
-DEVICE           = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-SYN_BATCH_SIZE   = 32
-TEST_BATCH_SIZE  = 256
-LR               = 1e-3
-EPOCHS_PER_STAGE = 5   # you can tweak this
+# ——— Command-line args ———
+parser = argparse.ArgumentParser(
+    description="Train a PDD-distilled model on its synthetic stages, then eval on the real test set.")
+parser.add_argument("--pdd-algo", type=str, required=True, choices=["mm-match", "grad-agg", "cmps-loss", "mult-branch"],
+    help="Which distillation algorithm (e.g. mm-match, grad-agg, cmps-loss, mult-branch)")
+parser.add_argument("--dataset", type=str, required=True, choices=["mnist","cifar10"],
+    help="Which dataset was distilled (mnist or cifar10)")
+parser.add_argument("--model", type=str, required=True,
+    choices=["convnet","resnet10","resnet18","vgg11"],
+    help="Which model architecture was used for distillation")
+parser.add_argument("--distilled-dir", type=str, default="data/Distilled",
+    help="Directory containing the .pt files")
+parser.add_argument("--syn-batch-size", type=int, default=32,
+    help="Batch size for synthetic data")
+parser.add_argument("--test-batch-size",type=int, default=256,
+    help="Batch size for the real test set")
+parser.add_argument("--lr", type=float, default=1e-3,
+    help="Learning rate used during the model training.")
+parser.add_argument("--epochs-per-stage", type=int, default=5,
+    help="Epochs to train on each synthetic stage")
+parser.add_argument("--no-cuda", action="store_true",
+    help="Disable CUDA, whether you want to use it even when it is available")
+args = parser.parse_args()
 
-# ——— 1) Load all synthetic stages ———
-data = torch.load(CKPT_PATH, map_location="cpu")
+# ——— Device setup ———
+use_cuda = torch.cuda.is_available() and not args.no_cuda
+device   = torch.device("cuda" if use_cuda else "cpu")
+print(f"Using device: {device}")
+
+# ——— Build paths & load distilled file ———
+fname = f"{args.pdd_algo}_{args.dataset}_{args.model}.pt"
+distilled_path = os.path.join(args.distilled_dir, fname)
+print(f"Loading distilled data from {distilled_path}")
+data = torch.load(distilled_path, map_location="cpu")
 X_list, Y_list = data["X"], data["Y"]
 num_stages = len(X_list)
 
-# ——— 2) Instantiate model ———
-# infer channels & classes from the *first* stage
-C = X_list[0].shape[1]
-num_classes = (Y_list[0].argmax(dim=1).max().item() + 1) if Y_list[0].ndim==2 else (Y_list[0].max().item()+1)
-model = ConvNet(in_channels=C, num_classes=num_classes).to(DEVICE)
+# ——— Model factory ———
+model_map = {
+    "convnet":  ConvNet,
+    "resnet10": ResNet10,
+    "resnet18": ResNet18,
+    "vgg11":    VGG11,
+}
+ModelClass = model_map[args.model]
 
-optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+# ——— Infer channels & classes ———
+C = X_list[0].shape[1]
+Y0 = Y_list[0]
+if Y0.ndim == 2:
+    K = int(Y0.argmax(dim=1).max().item() + 1)
+else:
+    K = int(Y0.max().item() + 1)
+
+# ——— Instantiate model & optimizer ———
+model     = ModelClass(in_channels=C, num_classes=K).to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 model.train()
 
-# ——— 3) Progressive training ———
+# ——— Progressive stage-by-stage training ———
 for stage_idx, (X_syn, Y_syn) in enumerate(zip(X_list, Y_list), start=1):
-    # turn soft/one-hot into hard labels if needed
+    # hard labels
     if Y_syn.ndim == 2:
         y_hard = Y_syn.argmax(dim=1)
     else:
         y_hard = Y_syn.flatten().long()
 
-    ds = TensorDataset(X_syn, y_hard)
-    loader = DataLoader(ds, batch_size=SYN_BATCH_SIZE, shuffle=True)
+    ds     = TensorDataset(X_syn, y_hard)
+    loader = DataLoader(ds, batch_size=args.syn_batch_size, shuffle=True)
 
-    print(f"\n=== Training on synthetic stage {stage_idx}/{num_stages} (N={len(ds)}) ===")
-    for epoch in range(1, EPOCHS_PER_STAGE + 1):
+    print(f"\nStage {stage_idx}/{num_stages}: training on {len(ds)} examples")
+    for epoch in range(1, args.epochs_per_stage + 1):
         total_loss = 0.0
         for xb, yb in loader:
-            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+            xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             logits = model(xb)
-            loss = F.cross_entropy(logits, yb)
+            loss   = F.cross_entropy(logits, yb)
             loss.backward()
             optimizer.step()
             total_loss += loss.item() * xb.size(0)
-        avg = total_loss / len(ds)
-        print(f" Stage {stage_idx}, Epoch {epoch}/{EPOCHS_PER_STAGE} → loss {avg:.4f}")
+        avg_loss = total_loss / len(ds)
+        print(f"  Epoch {epoch}/{args.epochs_per_stage} → loss {avg_loss:.4f}")
 
-# ——— 4) Evaluate on real MNIST test set ———
-transform = transforms.Compose([transforms.ToTensor()])
-mnist_test = MNIST("data/mnist", train=False, download=True, transform=transform)
-test_loader = DataLoader(mnist_test, batch_size=TEST_BATCH_SIZE, shuffle=False)
+# ———  Evaluate on real test set ———
+print(f"\nEvaluating on real {args.dataset} test set…")
+if args.dataset == "mnist":
+    test_ds = MNIST("data/mnist", train=False, download=True,
+                    transform=transforms.ToTensor())
+else:
+    test_ds = CIFAR10("data/cifar10", train=False, download=True,
+                      transform=transforms.ToTensor())
 
+test_loader = DataLoader(test_ds, batch_size=args.test_batch_size, shuffle=False)
 model.eval()
 correct = 0
 with torch.no_grad():
     for xb, yb in test_loader:
-        xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+        xb, yb = xb.to(device), yb.to(device)
         preds = model(xb).argmax(dim=1)
         correct += (preds == yb).sum().item()
 
-acc = correct / len(mnist_test)
-print(f"\nFinal test accuracy on real MNIST: {acc*100:.2f}%")
+acc = correct / len(test_ds)
+print(f"Final test accuracy on real {args.dataset}: {acc * 100:.2f}%")
