@@ -1,32 +1,76 @@
-import torch 
-import torch.nn as nn
+import torch
 import torch.nn.functional as F
-
 import matplotlib.pyplot as plt
 
-def show_gradient_maps(model_fn, X_syn, y_hard, num_classes=10, cmap="seismic"):
-    device = next(model_fn().parameters()).device
-    model = model_fn().to(device).eval()
+def show_gradient_maps(
+    ckpt_path: str,
+    model_cls,
+    X_syn: torch.Tensor,
+    Y_syn: torch.Tensor,
+    cmap: str = "seismic"
+):
+    """
+    Loads a checkpoint into `model_cls`, then for each class c
+    finds one synthetic example of that class, computes ∂L/∂X,
+    and plots the resulting heatmap.
+    
+    - ckpt_path: path to your .pth checkpoint
+    - model_cls: the class (e.g. ConvNet) to instantiate
+    - X_syn: tensor [N,C,H,W]
+    - Y_syn: tensor [N] of ints, or [N,K] one-hot/soft labels
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    N, C, H, W = X_syn.shape
 
-    plt.figure(figsize=(10,2))
+    # 1) Prepare hard labels
+    if Y_syn.ndim == 2:
+        y_hard = Y_syn.argmax(dim=1)
+    else:
+        y_hard = Y_syn.flatten().long()
+    num_classes = int(y_hard.max().item() + 1)
+
+    # 2) Build model, load weights, eval
+    model = model_cls(in_channels=C, num_classes=num_classes).to(device)
+    ckpt = torch.load(ckpt_path, map_location=device)
+    # pick the right dict
+    state_dict = (
+        ckpt.get("model_state_dict")
+        or ckpt.get("state_dict")
+        or ckpt
+    )
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    # 3) Plot
+    plt.figure(figsize=(num_classes * 2, 3))
     for c in range(num_classes):
-        # find an index of class c
-        idx = (y_hard == c).nonzero(as_tuple=True)[0]
-        if len(idx)==0:
+        # find one example of class c
+        idxs = (y_hard == c).nonzero(as_tuple=True)[0]
+        if idxs.numel() == 0:
             continue
-        idx = idx[0].item()
+        idx = idxs[0].item()
 
-        img = X_syn[idx:idx+1].to(device).detach().clone().requires_grad_(True)  # [1,C,H,W]
-        logits = model(img)
-        loss   = F.cross_entropy(logits, torch.tensor([c], device=device))
+        # prepare image for gradient
+        img = X_syn[idx : idx + 1].to(device).detach()
+        img.requires_grad_(True)
+
+        out = model(img)
+        loss = F.cross_entropy(out, torch.tensor([c], device=device))
+        model.zero_grad()
         loss.backward()
 
         grad = img.grad[0].cpu()
-        ax = plt.subplot(1, num_classes, c+1)
-        ax.imshow(grad.squeeze(), cmap=cmap)
-        ax.set_title(str(c))
+        # if C>1, average over channels
+        if C > 1:
+            grad_map = grad.mean(dim=0)
+        else:
+            grad_map = grad.squeeze(0)
+
+        ax = plt.subplot(1, num_classes, c + 1)
+        ax.imshow(grad_map, cmap=cmap)
+        ax.set_title(f"class {c}")
         ax.axis("off")
 
-    plt.suptitle("Gradient heatmaps ∂ℒ/∂X (cmap=seismic)")
+    plt.suptitle("Gradient heatmaps ∂ℒ/∂X")
     plt.tight_layout()
     plt.show()
