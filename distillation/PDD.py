@@ -84,6 +84,7 @@ class PDD:
         theta0 = self.model_fn().to(self.device).state_dict()
 
         # Main PDD loop over stages
+        last_stage = 0
         for stage in range(1, self.P + 1):
             # Initialize synthetic tensors
             X = nn.Parameter(torch.rand(self.synthetic_size, *self.image_shape, device=self.device))
@@ -117,7 +118,8 @@ class PDD:
 
                 # 2) Instantiate student & grab its param dict
                 model = self.model_fn().to(self.device)
-                model.load_state_dict(theta0)
+                if last_stage != stage:
+                    model.load_state_dict(theta0)
                 params = {name: p for name,p in model.named_parameters()}
 
                 # 3) (Re-)initialize momentum buffers each iter if needed
@@ -144,7 +146,7 @@ class PDD:
                             new_params[name]   = p - alpha_t * v_new
                     params = new_params
 
-                # 5) Meta-evaluate on real data (always recompute)
+                # 5) Meta-evaluate on real data (always recompute) see if the aggregation of multiple eval stages helps
                 try:
                     x_real, y_real = next(real_iter)
                 except StopIteration:
@@ -187,6 +189,7 @@ class PDD:
 
             # Update theta0 to the newly trained model
             theta0 = model.state_dict()
+            last_stage = stage
             
         self.final_model = theta0
         self.S_X, self.S_Y = S_X, S_Y
