@@ -88,11 +88,11 @@ class PDD:
         for stage in range(1, self.P + 1):
             # Initialize synthetic tensors
             X = nn.Parameter(torch.rand(self.synthetic_size, *self.image_shape, device=self.device))
-            Y = torch.arange(self.num_classes, device=self.device).repeat_interleave(self.synthetic_size // self.num_classes)
+            Y = nn.Parameter(torch.arange(self.num_classes, device=self.device, dtype=torch.float32).repeat_interleave(self.synthetic_size // self.num_classes))
             assert Y.shape[0] == self.synthetic_size
             
             # Synthetic optimizer
-            opt_params = [X, self.inner_lrs]
+            opt_params = [X, Y, self.inner_lrs]
             if self.syn_optimizer == 'sgd':
                 syn_opt = SGD(opt_params,
                               lr=self.lr_syn_data,
@@ -129,10 +129,9 @@ class PDD:
                 # 4) Unroll T inner‐loop steps with meta‐LR schedule
                 for t in range(self.T):
                     logits   = functional_call(model, params, (X_sup,))
-                    loss_sup = F.cross_entropy(logits, Y_sup)
-                    grads    = torch.autograd.grad(
-                        loss_sup, params.values(), create_graph=True
-                    )
+                    Y_sup_d  = RoundSTE.apply(Y_sup, self.num_classes)
+                    loss_sup = F.cross_entropy(logits, Y_sup_d.long())
+                    grads    = torch.autograd.grad(loss_sup, params.values(), create_graph=True)
 
                     alpha_t = self.inner_lrs[t]
                     new_params = {}
@@ -258,3 +257,22 @@ class PDD:
         plt.grid(True)
         plt.tight_layout()
         plt.savefig("assets/meta-loss-curve.png")
+        
+        
+### Helper functions and classes
+        
+class RoundSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, num_classes):
+        # Save num_classes for backward clamping (not strictly needed for STE,
+        # but keeps forward behavior identical to your spec).
+        ctx.num_classes = num_classes
+        # Round to nearest integer and clamp into [0, num_classes-1]
+        return input.round().clamp(0, num_classes - 1)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # Straight-through: pass gradients through unchanged to `input`,
+        # and no gradient for `num_classes`.
+        return grad_output, None
+    

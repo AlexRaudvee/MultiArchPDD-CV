@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.datasets import MNIST, CIFAR10
 
-from models.Model import ConvNet, ResNet10, ResNet18, VGG11
+from models.Model import ConvNet, ResNet10, ResNet18, VGG11, LeNet5
 from torchvision.utils import make_grid
 from distillation.PDD import PDD
 
@@ -34,6 +34,8 @@ def get_data_loader(name, data_dir, batch_size):
 
 def get_model_factory(name, in_channels, num_classes):
     name = name.lower()
+    if name == "lenet": 
+        return lambda: LeNet5(in_channels=in_channels, num_classes=num_classes)
     if name == "convnet":
         return lambda: ConvNet(in_channels=in_channels, num_classes=num_classes)
     if name == "resnet10":
@@ -55,7 +57,7 @@ def main():
     p.add_argument("--batch-size", type=int, default=128)
     # model & distillation
     p.add_argument("--pdd-core",    choices=["mm-match", "grad-agg", "cmps-loss", "mult-branch"], required=True)
-    p.add_argument("--model",       choices=["convnet","resnet10","resnet18","vgg11"], required=True)
+    p.add_argument("--model",       choices=["lenet", "convnet","resnet10","resnet18","vgg11"], required=True)
     p.add_argument("--synthetic-size", type=int, default=100, help="total number of synthetic examples")
     p.add_argument("--P",           type=int, default=9,   help="number of progressive stages")
     p.add_argument("--K",           type=int, default=200, help="outer-loop iterations per stage")

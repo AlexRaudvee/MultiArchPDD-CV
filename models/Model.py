@@ -80,3 +80,51 @@ class VGG11(nn.Module):
 
     def forward(self, x):
         return self.model(x)
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class LeNet5(nn.Module):
+    """
+    Classic LeNet-5 architecture (LeCun et al., 1998):
+      - C1: conv1→6 filters of 5×5
+      - S2: avgpool 2×2
+      - C3: conv6→16 filters of 5×5
+      - S4: avgpool 2×2
+      - C5: conv16→120 filters of 5×5
+      - F6: fc120→84
+      - Output: fc84→10
+      Activations: tanh; Pooling: average.
+    """
+    def __init__(self, in_channels: int = 1, num_classes: int = 10):
+        super(LeNet5, self).__init__()
+        # Convolutional layers
+        self.conv1 = nn.Conv2d(in_channels, 6, kernel_size=5)    # 32→28 if input 32×32 :contentReference[oaicite:5]{index=5}
+        self.pool1 = nn.AvgPool2d(kernel_size=2, stride=2)       # 28→14
+        self.conv2 = nn.Conv2d(6, 16, kernel_size=5)             # 14→10
+        self.pool2 = nn.AvgPool2d(kernel_size=2, stride=2)       # 10→5
+        self.conv3 = nn.Conv2d(16, 120, kernel_size=5)           # 5→1
+
+        # Fully connected layers
+        self.fc1 = nn.Linear(120, 84)                            # F6
+        self.fc2 = nn.Linear(84, num_classes)                    # Output layer
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Layer C1 + S2
+        x = torch.tanh(self.conv1(x))                            # tanh activation :contentReference[oaicite:6]{index=6}
+        x = self.pool1(x)                                        # average pooling :contentReference[oaicite:7]{index=7}
+
+        # Layer C3 + S4
+        x = torch.tanh(self.conv2(x))
+        x = self.pool2(x)
+
+        # Layer C5
+        x = torch.tanh(self.conv3(x))
+        x = x.view(x.size(0), -1)                                # flatten 120→
+
+        # Fully connected layers F6 and output
+        x = torch.tanh(self.fc1(x))
+        x = self.fc2(x)                                          # logits for 10 classes
+        return x
