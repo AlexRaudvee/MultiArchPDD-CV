@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import vgg11, resnet18
 from torch.hub import load_state_dict_from_url
+from collections import OrderedDict
 
 # Basic small ConvNet for MNIST/CIFAR
 class ConvNet(nn.Module):
@@ -101,30 +102,32 @@ class LeNet5(nn.Module):
     def __init__(self, in_channels: int = 1, num_classes: int = 10):
         super(LeNet5, self).__init__()
         # Convolutional layers
-        self.conv1 = nn.Conv2d(in_channels, 6, kernel_size=5)    # 32→28 if input 32×32 :contentReference[oaicite:5]{index=5}
-        self.pool1 = nn.AvgPool2d(kernel_size=2, stride=2)       # 28→14
-        self.conv2 = nn.Conv2d(6, 16, kernel_size=5)             # 14→10
-        self.pool2 = nn.AvgPool2d(kernel_size=2, stride=2)       # 10→5
-        self.conv3 = nn.Conv2d(16, 120, kernel_size=5)           # 5→1
+        self.features = nn.Sequential(
+            # C1: conv → tanh → S2: avgpool
+            nn.Conv2d(in_channels, 6, kernel_size=5),   # 28×28 → 24×24
+            nn.Tanh(),
+            nn.AvgPool2d(kernel_size=2, stride=2),      # 24×24 → 12×12
+
+            # C3: conv → tanh → S4: avgpool
+            nn.Conv2d(6, 16, kernel_size=5),            # 12×12 → 8×8
+            nn.Tanh(),
+            nn.AvgPool2d(kernel_size=2, stride=2),      # 8×8 → 4×4
+
+            # C5: conv → tanh
+            nn.Conv2d(16, 120, kernel_size=4),          # 4×4 → 1×1
+            nn.Tanh(),
+        )          # 4→1
 
         # Fully connected layers
-        self.fc1 = nn.Linear(120, 84)                            # F6
-        self.fc2 = nn.Linear(84, num_classes)                    # Output layer
+        self.classifier = nn.Sequential(
+            nn.Linear(120, 84),                         # F6
+            nn.Tanh(),
+            nn.Linear(84, num_classes)                  # Output
+        )                   # Output layer
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Layer C1 + S2
-        x = torch.tanh(self.conv1(x))                            # tanh activation :contentReference[oaicite:6]{index=6}
-        x = self.pool1(x)                                        # average pooling :contentReference[oaicite:7]{index=7}
-
-        # Layer C3 + S4
-        x = torch.tanh(self.conv2(x))
-        x = self.pool2(x)
-
-        # Layer C5
-        x = torch.tanh(self.conv3(x))
-        x = x.view(x.size(0), -1)                                # flatten 120→
-
-        # Fully connected layers F6 and output
-        x = torch.tanh(self.fc1(x))
-        x = self.fc2(x)                                          # logits for 10 classes
+        x = self.features(x)                # → [B, 120, 1, 1]
+        x = x.view(x.size(0), -1)           # → [B, 120]
+        # Classify
+        x = self.classifier(x)              # → [B, num_classes]
         return x
