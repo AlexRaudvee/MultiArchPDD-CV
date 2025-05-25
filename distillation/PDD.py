@@ -6,6 +6,9 @@ from torch.optim import SGD, Adam
 from tqdm.auto import trange
 from torch.func import functional_call
 
+from utils.func import sample_class
+from distillation.augment import DiffAug
+
 # torch.autograd.set_detect_anomaly(True)
 
 class PDD:
@@ -40,7 +43,7 @@ class PDD:
         real_loader,
         image_shape,
         num_classes,
-        synthetic_size,
+        ipc,
         P,
         K,
         T,
@@ -53,87 +56,129 @@ class PDD:
         inner_betas=(0.9, 0.999),
         inner_eps=1e-8,
         device=None,
+        z_init_std=0.05
     ):
-        self.model_fn        = model_fn
-        self.real_loader     = real_loader
-        self.image_shape     = image_shape
-        self.num_classes     = num_classes
-        self.synthetic_size  = synthetic_size
-        self.P               = P
-        self.K               = K
-        self.T               = T
-        self.lr_model        = lr_model
-        self.lr_syn_data     = lr_syn_data
-        self.syn_optimizer   = syn_optimizer.lower()
-        self.syn_momentum    = syn_momentum
-        self.inner_optimizer = inner_optimizer.lower()
-        self.inner_momentum  = inner_momentum
-        self.inner_betas     = inner_betas
-        self.inner_eps       = inner_eps
-        self.device          = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model_fn           = model_fn
+        self.real_loader        = real_loader
+        self.C, self.H, self.W  = image_shape
+        self.num_classes        = num_classes
+        self.ipc                = ipc
+        self.P                  = P
+        self.K                  = K
+        self.T                  = T
+        self.lr_model           = lr_model
+        self.lr_syn_data        = lr_syn_data
+        self.syn_optimizer      = syn_optimizer.lower()
+        self.syn_momentum       = syn_momentum
+        self.inner_optimizer    = inner_optimizer.lower()
+        self.inner_momentum     = inner_momentum
+        self.inner_betas        = inner_betas
+        self.inner_eps          = inner_eps
+        self.device             = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.debug              = True
+        self.warmup_steps       = 5
+        self.smooth_kernel      = 1
+        self.z_init_std         = z_init_std
+        self.m_per_class        = 1
 
         # storage for monitoring
+        self.synthetic_size = ipc * num_classes
+        self.S_X = []
+        self.S_Y = []
         self.meta_loss_history = {}  # list of lists per stage
-        self.inner_lrs  = nn.Parameter(torch.ones(self.T, device=self.device) * lr_model)
+        self.inner_lrs  = nn.Parameter(torch.log(torch.exp(torch.ones(self.T, device=self.device) * lr_model) - 1.0))
+        
+        # Precompute smoothing kernel
+        k = self.smooth_kernel
+        kernel = torch.ones((1, 1, k, k), device=self.device) / (k * k)
+        self.register_buffer = None  # placeholder
+        self.smooth_kernel_tensor = kernel
+        
+        # Augmentations 
+        self.aug       = DiffAug(dataset="mnist", p_flip=0, max_trans=0.05)
+        self.aug_rand  = DiffAug(dataset="mnist")
 
+    def _smooth(self, X: torch.Tensor) -> torch.Tensor:
+        # Apply average smoothing across each channel independently
+        # X: (B, C, H, W)
+        pad = self.smooth_kernel_tensor.shape[-1] // 2
+        # pad spatial dims
+        X_pad = F.pad(X, (pad, pad, pad, pad), mode='reflect')
+        # depthwise conv: groups=C applies each kernel to each channel
+        smoothed = F.conv2d(X_pad, self.smooth_kernel_tensor, groups=self.C)
+        return smoothed
+    
     def distill(self):
-        # Initialize distilled support sets
-        S_X, S_Y = [], []
+        # Initial student checkpoint
+        dataset = self.real_loader.dataset
+        theta_0 = self.model_fn().to(self.device).state_dict()
         real_iter = iter(self.real_loader)
-        # Sample initial model parameters
-        theta0 = self.model_fn().to(self.device).state_dict()
 
-        # Main PDD loop over stages
-        last_stage = 0
-        for stage in range(1, self.P + 1):
-            # Initialize synthetic tensors
-            X = nn.Parameter(torch.rand(self.synthetic_size, *self.image_shape, device=self.device))
-            Y = nn.Parameter(torch.arange(self.num_classes, device=self.device, dtype=torch.float32).repeat_interleave(self.synthetic_size // self.num_classes))
-            assert Y.shape[0] == self.synthetic_size
-            
-            # Synthetic optimizer
-            opt_params = [X, Y, self.inner_lrs]
-            if self.syn_optimizer == 'sgd':
-                syn_opt = SGD(opt_params,
-                              lr=self.lr_syn_data,
-                              momentum=self.syn_momentum)
+        for stage in range(self.P):
+            # Initialize new synthetic batch
+            X = nn.Parameter(torch.randn(self.ipc * self.num_classes, self.C, self.H, self.W, device=self.device) * 0.05)
+            Y = torch.arange(self.num_classes, device=self.device).repeat_interleave(self.ipc)
+
+            # Meta optimizer (only X)
+            syn_opt = SGD([X], lr=self.lr_syn_data, momentum=0.9) if False  \
+                else Adam([X], lr=self.lr_syn_data)
+            stage_losses = []
+
+            # Prepare previous synthetic
+            if self.S_X:
+                X_prev = torch.cat(self.S_X, dim=0).detach()
+                Y_prev = torch.cat(self.S_Y, dim=0).detach()
             else:
-                syn_opt = Adam(opt_params,
-                               lr=self.lr_syn_data)
+                X_prev = torch.empty(0, self.C, self.H, self.W, device=self.device)
+                Y_prev = torch.empty(0, dtype=torch.long, device=self.device)
 
-            # K refinement iterations
-            self.meta_loss_stage_history = []
-            for k in trange(
-                1, self.K + 1,
-                desc=f"[Stage {stage}/{self.P}] refine syn",
-                leave=False,
-                dynamic_ncols=True
-            ):
-                # 1) Build support: S union current synthetic
-                if S_X:
-                    X_sup = torch.cat([*S_X, X], dim=0)
-                    Y_sup = torch.cat([*S_Y, Y], dim=0)
-                else:
-                    X_sup, Y_sup = X, Y
+            for k in trange(self.K, desc=f"Stage {stage+1}/{self.P}", leave=False):
+                # Build support set
+                X_sup = torch.cat([X_prev, X], dim=0)
+                Y_sup = torch.cat([Y_prev, Y], dim=0)
 
-                # 2) Instantiate student & grab its param dict
-                model = self.model_fn().to(self.device)
-                if last_stage != stage:
-                    model.load_state_dict(theta0)
-                params = {name: p for name,p in model.named_parameters()}
-
-                # 3) (Re-)initialize momentum buffers each iter if needed
+                # Instantiate student and warm-up on real data
+                net = self.model_fn().to(self.device)
+                net.train()
+                params = {n: p for n, p in net.named_parameters()}
+                # (Re-)initialize momentum buffers each iter if needed
                 if self.inner_optimizer == "momentum":
                     velocities = {n: torch.zeros_like(p) for n,p in params.items()}
-
-                # 4) Unroll T inner‐loop steps with meta‐LR schedule
+                    
+                # Inner-loop on synthetic support
                 for t in range(self.T):
-                    logits   = functional_call(model, params, (X_sup,))
-                    Y_sup_d  = RoundSTE.apply(Y_sup, self.num_classes)
-                    loss_sup = F.cross_entropy(logits, Y_sup_d.long())
-                    grads    = torch.autograd.grad(loss_sup, params.values(), create_graph=True)
+                    loss_sup = 0.0
+                    # Loop over each digit class
+                    for c in range(self.num_classes):
+                        # --- real images of class c ---
+                        x_real_c, _ = self.real_loader.dataset.class_sample(c, self.m_per_class)
+                        x_real_c = x_real_c.to(self.device)
 
-                    alpha_t = self.inner_lrs[t]
+                        # --- synthetic images of class c from X_sup/Y_sup ---
+                        mask_c    = (Y_sup == c)
+                        x_syn_all = X_sup[mask_c]           # includes both old & new
+                        # pick m_per_class of them at random
+                        perm = torch.randperm(x_syn_all.size(0), device=self.device)
+                        idx  = perm[: self.m_per_class]
+                        x_syn_c = x_syn_all[idx]
+
+                        # --- form the 2m‐sized batch & labels ---
+                        x_cat = torch.cat([x_real_c, x_syn_c], dim=0)         # [2m, C, H, W]
+                        y_cat = torch.full((self.m_per_class,), c, device=self.device)
+                        y_cat = torch.cat([y_cat, y_cat], dim=0)              # [2m]
+
+                        # --- augment & forward ---
+                        x_cat = self.aug(x_cat)
+                        logits = functional_call(net, params, (x_cat,))
+                        loss_sup += F.cross_entropy(logits, y_cat)
+
+                    # 6) average over classes
+                    loss_sup = loss_sup / float(self.num_classes)
+
+                    # 7) compute grads & unroll exactly as before
+                    grads = torch.autograd.grad(loss_sup, params.values(), create_graph=True)
+
+                    alpha_t = F.softplus(self.inner_lrs[t])
                     new_params = {}
                     for (name,p), g in zip(params.items(), grads):
                         if self.inner_optimizer == "sgd":
@@ -145,55 +190,90 @@ class PDD:
                             new_params[name]   = p - alpha_t * v_new
                     params = new_params
 
-                # 5) Meta-evaluate on real data (always recompute) see if the aggregation of multiple eval stages helps
+                    if self.debug: 
+                        print(f"T Loss={loss_sup}")
+                        print("g_norm =", torch.norm(torch.stack([g.norm() for g in grads])))
+                        print("alpha_t=", alpha_t.item())
+                                    
+                # Meta-evaluate on real batch
                 try:
                     x_real, y_real = next(real_iter)
                 except StopIteration:
                     real_iter = iter(self.real_loader)
                     x_real, y_real = next(real_iter)
                 x_real, y_real = x_real.to(self.device), y_real.to(self.device)
-                logits_real = functional_call(model, params, (x_real,))
-                meta_loss   = F.cross_entropy(logits_real, y_real)
+                logits_real = functional_call(net, params, (x_real))
+                meta_loss = F.cross_entropy(logits_real, y_real) * 50000
+                stage_losses.append(meta_loss.item())
 
-                # 6) Record & do exactly one backward per fresh graph
-                self.meta_loss_stage_history.append(meta_loss.item())
-                syn_opt.zero_grad()
-                meta_loss.backward()
+                # Update synthetic X
+                syn_opt.zero_grad(); meta_loss.backward() 
+                
+                if self.debug:
+                    print(f"K Loss      ={meta_loss}")
+                    print("||∇_X meta|| =", X.grad.norm().item())
+                    print("ΔX norm:", (syn_opt.param_groups[0]['lr'] * X.grad).norm().item())
+                        
+                    if k % 20 == 0:
+                        self.plot_images(X, self.ipc)
                 syn_opt.step()
+                
+            # Save results
+            self.meta_loss_history[f"stage_{stage+1}"] = stage_losses
+            self.S_X.append(X.detach().clone())
+            self.S_Y.append(Y.detach().clone())
 
-                # 7) Clamp X in no_grad (harmless now)
-                with torch.no_grad():
-                    X.data.clamp_(0,1)
-                    
-            # store the metalosses 
-            self.meta_loss_history[f"{stage}"] = self.meta_loss_stage_history
-            
-            # Store final synthetic batch for this stage
-            S_X.append(X.detach().clone())
-            S_Y.append(Y.detach().clone())
-
-
-            # Re-train model on full distilled support
-            model = self.model_fn().to(self.device)
-            model.load_state_dict(theta0)
+            # Warm-up final student on all synth
+            net = self.model_fn().to(self.device)
+            net.load_state_dict(theta_0)
+            opt_inner = SGD(net.parameters(), lr=self.lr_model, momentum=0.9)
+            union_X = torch.cat(self.S_X, dim=0)
+            union_Y = torch.cat(self.S_Y, dim=0)
             for _ in range(self.T):
-                X_all = torch.cat(S_X, dim=0)
-                Y_all = torch.cat(S_Y, dim=0)
-                logits_all = model(X_all)
-                loss_all = F.cross_entropy(logits_all, Y_all)
-                model.zero_grad()
-                loss_all.backward()
-                for p in model.parameters():
-                    p.data -= self.lr_model * p.grad
+                logits_all = net(union_X)
+                loss_all = F.cross_entropy(logits_all, union_Y)
+                opt_inner.zero_grad(); loss_all.backward(); opt_inner.step()
 
-            # Update theta0 to the newly trained model
-            theta0 = model.state_dict()
-            last_stage = stage
-            
-        self.final_model = theta0
-        self.S_X, self.S_Y = S_X, S_Y
+            theta_0 = net.state_dict()
+
+            if self.debug: 
+                for c in range(10):
+                    x_r, y_r = sample_class(dataset, c, 16)
+                    loss_c = F.cross_entropy(net(x_r), y_r)
+                    print(f"Stage {stage}, class {c}, loss {loss_c:.3f}")
+                    
+        self.final_model = theta_0
+        return self.S_X, self.S_Y
         
-        return S_X, S_Y
+    def plot_images(self, X: torch.Tensor, ipc: int, out_path: str = 'assets/debug/synthetic.png'):
+        """
+        Plot synthetic images grouped by class.
+
+        Args:
+            X: Synthetic images tensor of shape (N, C, H, W), ordered by class.
+            ipc: Number of images per class to display.
+            out_path: Path to save the plotted grid image.
+        """
+        import os
+        from torchvision.utils import make_grid
+        from torchvision import transforms
+        from PIL import Image
+        if self.debug:
+            out_path = "assets/debug/synthetic.png"
+            os.makedirs("assets/debug", exist_ok=True)
+        
+        # Ensure X has enough images
+        total = ipc * self.num_classes
+        imgs = X[:total]
+
+        # Create grid: nrow=ipc images per class -> grid has num_classes rows
+        grid = make_grid(imgs, nrow=ipc, normalize=True, scale_each=False)
+
+        # Convert to PIL and optionally resize
+        to_pil = transforms.ToPILImage()
+        pil_img = to_pil(grid)
+        pil_img.save(out_path)
+        print(f"Saved synthetic image grid to {out_path}")
         
     def save_model(self, filepath: str) -> None:
         """
@@ -247,7 +327,7 @@ class PDD:
         plt.figure(figsize=(8,5))
         
         # Sort by stage number
-        for stage, losses in sorted(self.meta_loss_history.items(), key=lambda x: int(x[0])):
+        for stage, losses in sorted(self.meta_loss_history.items(), key=lambda x: int(x[0].removeprefix('stage_'))):
             iterations = range(1, len(losses) + 1)
             plt.plot(iterations, losses, marker='o', label=f"Stage {stage}")
         plt.xlabel("Refinement Iteration k")
@@ -257,22 +337,3 @@ class PDD:
         plt.grid(True)
         plt.tight_layout()
         plt.savefig("assets/meta-loss-curve.png")
-        
-        
-### Helper functions and classes
-        
-class RoundSTE(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, num_classes):
-        # Save num_classes for backward clamping (not strictly needed for STE,
-        # but keeps forward behavior identical to your spec).
-        ctx.num_classes = num_classes
-        # Round to nearest integer and clamp into [0, num_classes-1]
-        return input.round().clamp(0, num_classes - 1)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        # Straight-through: pass gradients through unchanged to `input`,
-        # and no gradient for `num_classes`.
-        return grad_output, None
-    
