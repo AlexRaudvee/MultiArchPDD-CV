@@ -197,10 +197,10 @@ class PDDGradientAggregation:
                         velocitiess = new_velocs
 
                     if self.debug: 
-                            print(f"T Loss={loss_sups}")
                             for i, grads in enumerate(gradss):
-                                print(f"g_norm_{i} =", torch.norm(torch.stack([g.norm() for g in grads])))
-                            print("alpha_t=", alpha_t.item())
+                                print(f"     - Model {i+1}: T Loss      ={loss_sups}")
+                                print(f"     - Model {i+1}: g_norm      =", torch.norm(torch.stack([g.norm() for g in grads])).item())
+                                print(f"     - Model {i+1}: alpha_t     =", alpha_t.item())
                                     
                 # Meta-evaluate on real batch
                 try:

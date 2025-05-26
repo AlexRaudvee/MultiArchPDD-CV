@@ -200,10 +200,10 @@ class PDDCompositeLoss:
                         velocitiess = new_velocs      
                         
                     if self.debug: 
-                        print(f"T Loss={loss_sups}")
                         for i, grads in enumerate(gradss):
-                            print(f"g_norm_{i+1}=", torch.norm(torch.stack([g.norm() for g in grads])))
-                        print("alpha_t=", alpha_t.item())
+                            print(f"     - Model {i+1}: T Loss =        {loss_sups}")
+                            print(f"     - Model {i+1}: g_norm =        ", torch.norm(torch.stack([g.norm() for g in grads])).item())
+                            print(f"     - Model {i+1}: alpha_t =       ", alpha_t.item())
                                     
                 # Meta-evaluate on real batch
                 try:
@@ -225,9 +225,9 @@ class PDDCompositeLoss:
                 syn_opt.zero_grad(); composite_loss.backward() 
                 
                 if self.debug:
-                    print(f"K Loss      ={composite_loss}")
-                    print("||∇_X meta|| =", X.grad.norm().item())
-                    print("ΔX norm:", (syn_opt.param_groups[0]['lr'] * X.grad).norm().item())
+                    print(f"     - K Loss       ={composite_loss}")
+                    print("     - ||∇_X meta||  =", X.grad.norm().item())
+                    print("     - ΔX norm       =", (syn_opt.param_groups[0]['lr'] * X.grad).norm().item())
                         
                     if k % 20 == 0:
                         self.plot_images(X, self.ipc)
@@ -256,7 +256,7 @@ class PDDCompositeLoss:
                     for c in range(10):
                         x_r, y_r = sample_class(dataset, c, 16)
                         loss_c = F.cross_entropy(net(x_r), y_r)
-                        print(f"Stage {stage}, class {c}, loss {loss_c:.3f}")
+                        print(f"     - Stage {stage}, class {c}, loss {loss_c:.3f}")
                         
         self.final_models = theta_0s
         return self.S_X, self.S_Y

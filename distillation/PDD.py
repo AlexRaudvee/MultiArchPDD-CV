@@ -207,7 +207,7 @@ class PDD:
                 stage_losses.append(meta_loss.item())
 
                 # Update synthetic X
-                syn_opt.zero_grad(); meta_loss.backward() 
+                syn_opt.zero_grad(); meta_loss.backward(); syn_opt.step()
                 
                 if self.debug:
                     print(f"K Loss      ={meta_loss}")
@@ -216,7 +216,6 @@ class PDD:
                         
                     if k % 20 == 0:
                         self.plot_images(X, self.ipc)
-                syn_opt.step()
                 
             # Save results
             self.meta_loss_history[f"stage_{stage+1}"] = stage_losses
