@@ -5,11 +5,18 @@ import torch.nn.functional as F
 from torch.optim import SGD, Adam
 from tqdm.auto import trange
 from torch.func import functional_call
+from torch.utils.data import Subset, DataLoader
 
-from utils.func import sample_class
-from distillation.augment import DiffAug
+from Distillations.augment import DiffAug
 
 # torch.autograd.set_detect_anomaly(True)
+
+def sample_class(dataset, class_label, batch_size=64):
+    # collect indices whose label == class_label
+    indices = [i for i, (_, lbl) in enumerate(dataset) if lbl == class_label]
+    subset  = Subset(dataset, indices)
+    loader  = DataLoader(subset, batch_size=batch_size, shuffle=True)
+    return next(iter(loader))
 
 class PDDCompositeLoss:
     """
@@ -56,9 +63,9 @@ class PDDCompositeLoss:
         inner_momentum=0.9,
         inner_betas=(0.9, 0.999),
         inner_eps=1e-8,
+        debug=False,
         device=None,
         z_init_std=0.05,
-        debug=True,
         m=1
     ):
         self.model_fns           = model_fns
@@ -302,7 +309,6 @@ class PDDCompositeLoss:
         for final_model, filepath in zip(self.final_models, filepaths):
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
             torch.save(final_model, filepath)
-        print("[Distillator]:") 
         print(f"     - models saved to {filepaths}")
 
     def save_distilled(self, filepath: str) -> None:
@@ -327,7 +333,6 @@ class PDDCompositeLoss:
             'inner_lrs':       self.inner_lrs.detach().cpu(),
         }
         torch.save(data, filepath)
-        print("[Distillator]:") 
         print(f"     - distilled dataset & history saved to {filepath}")
     
     def plot_meta_losses(self):

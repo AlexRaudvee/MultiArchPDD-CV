@@ -1,9 +1,25 @@
+import os
+import argparse
+
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
+import torch.utils.data.dataloader
+
 from typing import Sequence
 from torch.utils.data import Subset, DataLoader
+from Dataloader.dataset import CustomDataset
+
+from torchvision import transforms
+from torchvision.datasets import MNIST, CIFAR10
+
+from Models.model import ConvNet, ResNet10, ResNet18, VGG11, LeNet5
+
+from Distillations.PDD import PDD
+from Distillations.PDD_GA import PDDGradientAggregation
+from Distillations.PDD_CL import PDDCompositeLoss
+from Distillations.PDD_MB import PDDMultiBranch
 
 def show_gradient_maps(
     ckpt_path: str,
@@ -230,11 +246,165 @@ def show_pdd_synthetic(
 
     # plt.tight_layout()
     plt.show()
+
+
+def get_model_factory(name, in_channels, num_classes):
+    name = name.lower()
+    if name == "lenet": 
+        return lambda: LeNet5(in_channels=in_channels, num_classes=num_classes)
+    if name == "convnet":
+        return lambda: ConvNet(in_channels=in_channels, num_classes=num_classes)
+    if name == "resnet10":
+        return lambda: ResNet10(in_channels=in_channels, num_classes=num_classes)
+    if name == "resnet18":
+        return lambda: ResNet18(in_channels=in_channels, num_classes=num_classes)
+    if name == "vgg11":
+        return lambda: VGG11(in_channels=in_channels, num_classes=num_classes)
+    raise ValueError(f"Unknown model {name}")
+
+
+def get_data_loader(name, data_dir, batch_size):
+    ts = transforms.Compose([transforms.ToTensor()])
+
+    if name.lower() == "mnist":
+        base_ds = MNIST(data_dir, download=True, train=True, transform=ts)
+        shape = (1, 28, 28)
+        num_classes = 10
+
+    elif name.lower() == "cifar10":
+        base_ds = CIFAR10(data_dir, download=True, train=True, transform=ts)
+        shape = (3, 32, 32)
+        num_classes = 10
+
+    else:
+        raise ValueError(f"Unknown dataset {name}")
+
+    # Wrap it so you get class_sample(c, k) support
+    ds = CustomDataset(base_ds)
+
+    loader = DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=True,
+    )
+    return loader, shape, num_classes
+
+
+def init_pdd(pdd_core: str, 
+             models: list, 
+             n_cls: int, 
+             img_shape: list, 
+             loader: torch.utils.data.dataloader, 
+             ipc: int, 
+             P: int, K: int, T: int,
+             lr_model: float, 
+             lr_syn_data: float, 
+             syn_optimizer: str, 
+             inner_optimizer: str,
+             debug: bool):
     
+    pdd_core = pdd_core.lower()
+
+    if pdd_core == "mm-match":
+        model_fn = get_model_factory(models, img_shape[0], n_cls)
+        pdd = PDD(
+            model_fn=model_fn,
+            real_loader=loader,
+            image_shape=img_shape,
+            num_classes=n_cls,
+            ipc=ipc,
+            P=P, K=K, T=T,
+            lr_model=lr_model,
+            lr_syn_data=lr_syn_data,
+            syn_optimizer=syn_optimizer,
+            inner_optimizer=inner_optimizer,
+            debug=debug
+        )
+        
+    elif pdd_core == "grad-agg":
+        model_fns = [get_model_factory(model, img_shape[0], n_cls) for model in models]
+        pdd = PDDGradientAggregation(
+            model_fns=model_fns,
+            real_loader=loader,
+            image_shape=img_shape,
+            num_classes=n_cls,
+            ipc=ipc,
+            P=P, K=K, T=T,
+            lr_model=lr_model,
+            lr_syn_data=lr_syn_data,
+            syn_optimizer=syn_optimizer,
+            inner_optimizer=inner_optimizer,
+            debug=debug
+        )
+
+    elif pdd_core == "cmps-loss":
+        model_fns = [get_model_factory(model, img_shape[0], n_cls) for model in models]
+        pdd = PDDCompositeLoss(
+            model_fns=model_fns,
+            real_loader=loader,
+            image_shape=img_shape,
+            num_classes=n_cls,
+            ipc=ipc,
+            P=P, K=K, T=T,
+            lr_model=lr_model,
+            lr_syn_data=lr_syn_data,
+            composite_weights=[0.5, 0.5],
+            syn_optimizer=syn_optimizer,
+            inner_optimizer=inner_optimizer,
+            debug=debug
+        )
+
+    elif pdd_core == "mult-branch":
+        model_fns = [get_model_factory(model, img_shape[0], n_cls) for model in models]
+        pdd = PDDMultiBranch(
+            model_fns=model_fns,
+            real_loader=loader,
+            image_shape=img_shape,
+            num_classes=n_cls,
+            ipc=ipc,
+            P=P, K=K, T=T,
+            lr_model=lr_model,
+            lr_syn_data=lr_syn_data,
+            syn_optimizer=syn_optimizer,
+            inner_optimizer=inner_optimizer,
+            debug=debug
+        )
+
+    else: 
+        NotImplementedError(f"The following pdd algorithm: {pdd_core} is not implemented yet!")
     
-def sample_class(dataset, class_label, batch_size=64):
-    # collect indices whose label == class_label
-    indices = [i for i, (_, lbl) in enumerate(dataset) if lbl == class_label]
-    subset  = Subset(dataset, indices)
-    loader  = DataLoader(subset, batch_size=batch_size, shuffle=True)
-    return next(iter(loader))
+    return pdd
+
+
+def init_loader(out_dir: str, ckpt_dir: str, dataset: str, data_dir: str, batch_size: int):
+    # preparation of derictories
+    os.makedirs(out_dir,  exist_ok=True)
+    os.makedirs(ckpt_dir, exist_ok=True)
+    os.makedirs("assets/viz_synthetic", exist_ok=True)
+    
+    # Dataloader initializations
+    print("[Dataloader]:")
+    print("     - Loading...")
+    loader, shape, num_classes = get_data_loader(dataset, data_dir=data_dir, batch_size=batch_size)
+    print("     - Done.")
+    
+    return loader, shape, num_classes
+
+
+def str2bool(v):
+    """
+    Convert a string to a boolean.
+    Accepts (case‐insensitive) 'true','t','yes','y','1' → True
+                    and 'false','f','no','n','0' → False
+    Otherwise it raises an error.
+    """
+    if isinstance(v, bool):
+        return v
+    v = v.lower()
+    if v in ('true', 't', 'yes', 'y', '1'):
+        return True
+    if v in ('false', 'f', 'no', 'n', '0'):
+        return False
+    raise argparse.ArgumentTypeError("Boolean value expected (True/False).")

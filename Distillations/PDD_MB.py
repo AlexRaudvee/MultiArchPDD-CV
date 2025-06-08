@@ -1,24 +1,32 @@
-import torch
+import torch                                    # torch imports 
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch.optim import SGD, Adam
 from tqdm.auto import trange
+from torch.optim import SGD, Adam
 from torch.func import functional_call
+from torch.utils.data import Subset, DataLoader
 
-from utils.func import sample_class
-from distillation.augment import DiffAug
+from Distillations.augment import DiffAug
 
-torch.autograd.set_detect_anomaly(True)
+from typing import List, Tuple, Dict            # typing imports
+# torch.autograd.set_detect_anomaly(True)
 
-class PDDGradientAggregation:
+def sample_class(dataset, class_label, batch_size=64):
+    # collect indices whose label == class_label
+    indices = [i for i, (_, lbl) in enumerate(dataset) if lbl == class_label]
+    subset  = Subset(dataset, indices)
+    loader  = DataLoader(subset, batch_size=batch_size, shuffle=True)
+    return next(iter(loader))
+
+class PDDMultiBranch:
     """
     Progressive Dataset Distillation with naive meta-model matching
     (Algorithm 3 from the report), using `higher` for differentiable inner-loop
     and PyTorch optimizers for both student and synthetic updates.
 
     Args:
-        model_fns:       list of callables that returns a fresh nn.Module()s
+        model_fns:       list of callable that returns a fresh nn.Module()
         real_loader:     DataLoader yielding (x_real, y_real)
         image_shape:     tuple (C, H, W)
         num_classes:     number of output classes
@@ -26,9 +34,9 @@ class PDDGradientAggregation:
         P:               number of PDD stages
         K:               number of synthetic-refinement iterations per stage
         T:               number of fine-tuning steps in inner/outer loops
-        lr_models:       learning rate for student inner-loop optimizer
+        lr_model:        learning rate for student inner-loop optimizer
         lr_syn_data:     learning rate for synthetic updates (meta-step)
-        syn_optimizer:   'adam' or 'momentum' for updating synthetic variables
+        syn_optimizer:   'adam' or 'sgd' for updating synthetic variables
         syn_momentum:    momentum for synthetic SGD optimizer
         inner_optimizer: 'sgd', 'momentum' for inner-loop learning
         inner_momentum:  momentum for student SGD with momentum
@@ -55,6 +63,7 @@ class PDDGradientAggregation:
         inner_momentum=0.9,
         inner_betas=(0.9, 0.999),
         inner_eps=1e-8,
+        debug=False,
         device=None,
         z_init_std=0.05
     ):
@@ -75,7 +84,7 @@ class PDDGradientAggregation:
         self.inner_betas        = inner_betas
         self.inner_eps          = inner_eps
         self.device             = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.debug              = True
+        self.debug              = debug
         self.warmup_steps       = 5
         self.smooth_kernel      = 1
         self.z_init_std         = z_init_std
@@ -108,24 +117,79 @@ class PDDGradientAggregation:
         smoothed = F.conv2d(X_pad, self.smooth_kernel_tensor, groups=self.C)
         return smoothed
     
+    def _consistency_loss(self,
+        Xs: List[torch.Tensor],
+        Ys: List[torch.Tensor],
+        lam: float,
+    ) -> torch.Tensor:
+        """
+        Given lists of M synthetic‐data tensors Xs[i] ∈ R^{B×C×H×W} and
+        synthetic‐label tensors Ys[i] ∈ R^{B}, compute:
+
+        L_cons = λ * (
+            ∑_{i=1..M} || Xs[i] – mean(Xs) ||²
+        + ∑_{i=1..M} || Ys[i] – mean(Ys) ||²
+        )
+
+        If do_alignment=True, then after computing L_cons, we in‐place align
+        each Xs[i], Ys[i] by pulling them λ-proportion of the way toward the mean,
+        and finally overwrite all branches with that same aligned mean.
+
+        Returns:
+        L_cons  (scalar, with gradient w.r.t. every Xs[i], Ys[i])
+        """
+
+        M = len(Xs)
+        assert M == len(Ys), "must have same number of Xs and Ys"
+
+        # 1) compute branch‐mean
+        mean_X = sum(Xs) / M      # elementwise mean of each branch
+        mean_Y = sum(Ys) / M
+
+        # 2) consistency loss
+        loss_X = sum(torch.sum((X - mean_X).pow(2)) for X in Xs)
+        loss_Y = sum(torch.sum((Y - mean_Y).pow(2)) for Y in Ys)
+        L_cons = lam * (loss_X + loss_Y)
+
+        return L_cons
+    
+    def _alignment(self,
+                   Xs: List[torch.Tensor],
+                   Ys: List[torch.Tensor], 
+                   lam: float):
+        
+        M = len(Xs)
+        assert M == len(Ys), "must have same number of Xs and Ys"
+        
+        mean_X = sum(Xs) / M      # elementwise mean of each branch
+        mean_Y = sum(Ys) / M
+        
+        # align and synchronize in‐place, under no_grad
+        X_aligned = (1/M)*(sum(Xs)) - lam*(sum(X - mean_X for X in Xs))
+        # Y_aligned = (1/M)*(sum(Ys)) - lam*(sum(Y - mean_Y for Y in Ys))
+        Y_aligned = Ys[0] # coz all ys are the same.
+        
+        return X_aligned, Y_aligned
+
+        
     def distill(self):
         # Initial student checkpoint
         dataset = self.real_loader.dataset
-        #nets = [fn() for fn in model_fns]
         theta_0s = [fn().to(self.device).state_dict() for fn in self.model_fns]
         real_iter = iter(self.real_loader)
 
         for stage in range(self.P):
             # Initialize new synthetic batch
-            X = nn.Parameter(torch.randn(self.ipc * self.num_classes, self.C, self.H, self.W, device=self.device) * 0.05)
-            Y = torch.arange(self.num_classes, device=self.device).repeat_interleave(self.ipc)
+            Xs = [nn.Parameter(torch.randn(self.ipc * self.num_classes, self.C, self.H, self.W, device=self.device) * 0.05) for _ in range(len(self.model_fns))]
+            Ys = [torch.arange(self.num_classes, device=self.device).repeat_interleave(self.ipc) for _ in range(len(self.model_fns))]
 
             # Meta optimizer (only X)
-            syn_opt = SGD([X], lr=self.lr_syn_data, momentum=0.9) if False  \
-                else Adam([X], lr=self.lr_syn_data)
-            stage_lossess = [[] for _ in range(len(self.model_fns))]
+            syn_opt = SGD(Xs, lr=self.lr_syn_data, momentum=0.9) if False  \
+                else Adam(Xs, lr=self.lr_syn_data)
+            stage_losses = [[] for _ in range(len(self.model_fns))]
 
             # Prepare previous synthetic
+            
             if self.S_X:
                 X_prev = torch.cat(self.S_X, dim=0).detach()
                 Y_prev = torch.cat(self.S_Y, dim=0).detach()
@@ -135,73 +199,73 @@ class PDDGradientAggregation:
 
             for k in trange(self.K, desc=f"Stage {stage+1}/{self.P}", leave=False):
                 # Build support set
-                X_sup = torch.cat([X_prev, X], dim=0)
-                Y_sup = torch.cat([Y_prev, Y], dim=0)
+                X_sups = [torch.cat([X_prev, X], dim=0) for X in Xs]
+                Y_sups = [torch.cat([Y_prev, Y], dim=0) for Y in Ys]
 
                 # Instantiate student and warm-up on real data
                 nets = [fn().to(self.device).train() for fn in self.model_fns]
                 paramss = [{n: p for n, p in net.named_parameters()} for net in nets]
+                
                 # (Re-)initialize momentum buffers each iter if needed
                 if self.inner_optimizer == "momentum":
                     velocitiess = [{n: torch.zeros_like(p) for n,p in params.items()} for params in paramss]
-                    new_velocs = [{n: v.clone() for n, v in velocitiess[i].items()} for i in range(len(self.model_fns))]
-                    
-                # Inner-loop on synthetic support
-                for t in range(self.T):
-                    loss_sups = [0.0]*len(self.model_fns)
-                    # Loop over each digit class
-                    for c in range(self.num_classes):
-                        # real images of class c
-                        x_real_c, _ = self.real_loader.dataset.class_sample(c, self.m_per_class)
-                        x_real_c = x_real_c.to(self.device)
+                
+                loss_sups   = [.0 for _ in range(len(self.model_fns))]
+                new_paramss = [{} for _ in range(len(self.model_fns))]
+                for i, (X_sup, Y_sup) in enumerate(zip(X_sups, Y_sups)):
+                    loss_sup = 0.0
+                    # Inner-loop on synthetic support
+                    for t in range(self.T):
+                        # Loop over each digit class
+                        for c in range(self.num_classes):
+                            # --- real images of class c ---
+                            x_real_c, _ = self.real_loader.dataset.class_sample(c, self.m_per_class)
+                            x_real_c = x_real_c.to(self.device)
 
-                        # synthetic images of class c from X_sup/Y_sup
-                        mask_c    = (Y_sup == c)
-                        x_syn_all = X_sup[mask_c]           # includes both old & new
-                        # pick m_per_class of them at random
-                        perm = torch.randperm(x_syn_all.size(0), device=self.device)
-                        idx  = perm[: self.m_per_class]
-                        x_syn_c = x_syn_all[idx]
+                            # --- synthetic images of class c from X_sup/Y_sup ---
+                            mask_c    = (Y_sup == c)
+                            x_syn_all = X_sup[mask_c]           # includes both old & new
+                            # pick m_per_class of them at random
+                            perm = torch.randperm(x_syn_all.size(0), device=self.device)
+                            idx  = perm[: self.m_per_class]
+                            x_syn_c = x_syn_all[idx]
 
-                        # form the 2m‐sized batch & labels
-                        x_cat = torch.cat([x_real_c, x_syn_c], dim=0)         # [2m, C, H, W]
-                        y_cat = torch.full((self.m_per_class,), c, device=self.device)
-                        y_cat = torch.cat([y_cat, y_cat], dim=0)              # [2m]
+                            # --- form the 2m‐sized batch & labels ---
+                            x_cat = torch.cat([x_real_c, x_syn_c], dim=0)         # [2m, C, H, W]
+                            y_cat = torch.full((self.m_per_class,), c, device=self.device)
+                            y_cat = torch.cat([y_cat, y_cat], dim=0)              # [2m]
 
-                        # augment & forward
-                        x_cat = self.aug(x_cat)
-                        logitss = [functional_call(net, params, (x_cat,)) for net, params in zip(nets, paramss)]
-                        loss_sups = [loss_sup + F.cross_entropy(logits, y_cat) for loss_sup, logits in zip(loss_sups ,logitss)]
+                            # --- augment & forward ---
+                            x_cat = self.aug(x_cat)
+                            logits = functional_call(nets[i], paramss[i], (x_cat,))
+                            loss_sup += F.cross_entropy(logits, y_cat)
+
+                        # 6) average over classes
+                        loss_sup = loss_sup / float(self.num_classes)
+                        loss_sups[i] = loss_sup
                         
+                        # 7) compute grads & unroll exactly as before
+                        grads= torch.autograd.grad(loss_sup, paramss[i].values(), create_graph=True)
 
-                    # 6) average over classes
-                    loss_sups = [loss_sup / float(self.num_classes) for loss_sup in loss_sups]
+                        alpha_t = F.softplus(self.inner_lrs[t])
 
-                    # 7) compute grads & unroll exactly as before
-                    gradss = [torch.autograd.grad(loss_sup, params.values(), create_graph=True) for loss_sup, params in zip(loss_sups, paramss)]
-
-                    alpha_t = F.softplus(self.inner_lrs[t])
-                    new_paramss = [{} for _ in range(len(self.model_fns))]
-                    for i, (params, grads) in enumerate(zip(paramss, gradss)):
-                        for (name,p), g in zip(params.items(), grads):
+                        for (name,p), g in zip(paramss[i].items(), grads):
                             if self.inner_optimizer == "sgd":
                                 new_paramss[i][name] = p - alpha_t * g
                             else:  # momentum
                                 v_new = (self.inner_momentum * velocitiess[i][name]
                                         + (1-self.inner_momentum) * g)
-                                new_velocs[i][name]   = v_new
+                                velocitiess[i][name]   = v_new
                                 new_paramss[i][name]   = p - alpha_t * v_new
-                    
-                    paramss = new_paramss
-                    if self.inner_optimizer == "momentum":
-                        velocitiess = new_velocs
-
-                    if self.debug: 
-                            for i, grads in enumerate(gradss):
-                                print(f"     - Model {i+1}: T Loss      ={loss_sups}")
-                                print(f"     - Model {i+1}: g_norm      =", torch.norm(torch.stack([g.norm() for g in grads])).item())
-                                print(f"     - Model {i+1}: alpha_t     =", alpha_t.item())
                                     
+                        paramss[i] = new_paramss[i]
+
+                        if self.debug: 
+                            print(f"     - Model {i+1}: T Loss ={loss_sup}")
+                            print(f"     - Model {i+1}: g_norm =", torch.norm(torch.stack([g.norm() for g in grads])))
+                            print(f"     - Model {i+1}: alpha_t =", alpha_t.item())
+                                        
+                
                 # Meta-evaluate on real batch
                 try:
                     x_real, y_real = next(real_iter)
@@ -209,52 +273,62 @@ class PDDGradientAggregation:
                     real_iter = iter(self.real_loader)
                     x_real, y_real = next(real_iter)
                 x_real, y_real = x_real.to(self.device), y_real.to(self.device)
-                logitss_real = [functional_call(net, params, (x_real)) 
-                                for net, params in zip(nets, paramss)]
-                meta_losses = [F.cross_entropy(logits_real, y_real) * 50000 for logits_real in logitss_real]
-                grad = torch.autograd.grad(outputs=meta_losses, inputs=(X,), grad_outputs=[torch.tensor(1/len(self.model_fns), dtype=X.dtype)]*len(self.model_fns))[0]
+                logitss_real = [functional_call(net, params, (x_real)) for net, params in zip(nets, paramss)]
+                _meta_losses = [F.cross_entropy(logits_real, y_real) * 50000 for logits_real in logitss_real]
                 
-                for i, stage_loss in enumerate(stage_lossess):
-                    stage_loss.append(meta_losses[i].item())
+                # compute consistency loss
+                cons_loss = self._consistency_loss(Xs, Ys, lam=0.1)
+                
+                meta_losses = [meta_loss + cons_loss for meta_loss in _meta_losses]
+                stage_losses.append([meta_loss.item() for meta_loss in meta_losses])
 
-                # Update synthetic X
-                syn_opt.zero_grad(); X.grad = grad
+                # prepare the loss for backward pass
+                meta_loss = torch.stack(meta_losses).mean()
+                
+                # Update synthetic Xs
+                syn_opt.zero_grad(); meta_loss.backward(retain_graph=(i < len(meta_losses) - 1)); syn_opt.step()
+                    
+                # align branches
+                X_aligned, Y_aligned = self._alignment(Xs, Ys, lam=0.1)
+
                 
                 if self.debug:
-                    print(f"K Losses    ={meta_losses}")
-                    print("||∇_X meta|| =", X.grad.norm().item())
-                    print("ΔX norm:      ", (syn_opt.param_groups[0]['lr'] * X.grad).norm().item())
+                    print(f"     - K Loss      ={meta_loss}")
+                    for i, X in enumerate(Xs):
+                        print(f"     - Model {i+1}: ||∇_X meta|| =", X.grad.norm().item())
+                        print(f"     - Model {i+1}: ΔX norm  =", (syn_opt.param_groups[0]['lr'] * X.grad).norm().item())
                         
                     if k % 20 == 0:
-                        self.plot_images(X, self.ipc)
-                syn_opt.step()
+                        self.plot_images(X_aligned, self.ipc)
                 
             # Save results
-            self.meta_loss_history[f"stage_{stage+1}"] = stage_lossess
-            self.S_X.append(X.detach().clone())
-            self.S_Y.append(Y.detach().clone())
+            self.meta_loss_history[f"stage_{stage+1}"] = stage_losses
+            self.S_X.append(X_aligned.detach().clone())
+            self.S_Y.append(Y_aligned.detach().clone())
 
-            # Warm-up final students on all synth
-            nets = [fn().to(self.device) for fn in self.model_fns]
+            # Warm-up final student on all synth
             union_X = torch.cat(self.S_X, dim=0)
             union_Y = torch.cat(self.S_Y, dim=0)
-            for net, theta_0 in zip(nets, theta_0s):
+            nets = [fn().to(self.device) for fn in self.model_fns]
+            for i, (net, theta_0) in enumerate(zip(nets, theta_0s)):
                 net.load_state_dict(theta_0)
-                opt_inner = SGD(net.parameters(), lr=self.lr_model, momentum=0.9)
+                opt_inner = SGD(net.parameters(), lr=self.lr_model, momentum=0.9) if self.inner_optimizer == "momentum" \
+                    else Adam(net.params(), lr=self.lr_model)
                 for _ in range(self.T):
                     logits_all = net(union_X)
                     loss_all = F.cross_entropy(logits_all, union_Y)
                     opt_inner.zero_grad(); loss_all.backward(); opt_inner.step()
 
-            theta_0s = [net.state_dict() for net in nets]
+                theta_0s[i] = net.state_dict()
 
             if self.debug: 
-                for c in range(10):
-                    x_r, y_r = sample_class(dataset, c, 16)
-                    losses_c = [F.cross_entropy(net(x_r), y_r) for net in nets]
-                    print(f"Stage {stage}, class {c}, losses {losses_c}")
+                for i, net in enumerate(nets):
+                    for c in range(10):
+                        x_r, y_r = sample_class(dataset, c, 16)
+                        loss_c = F.cross_entropy(net(x_r), y_r)
+                        print(f"     - Model {i+1}: Stage {stage}, class {c}, loss {loss_c:.3f}")
                     
-        self.final_models = [theta_0 for theta_0 in theta_0s]
+        self.final_models = theta_0s
         return self.S_X, self.S_Y
         
     def plot_images(self, X: torch.Tensor, ipc: int, out_path: str = 'assets/debug/synthetic.png'):
@@ -285,9 +359,9 @@ class PDDGradientAggregation:
         to_pil = transforms.ToPILImage()
         pil_img = to_pil(grid)
         pil_img.save(out_path)
-        print(f"Saved synthetic image grid to {out_path}")
+        print(f"     - Saved synthetic image grid to {out_path}")
         
-    def save_model(self, filepaths: list) -> None:
+    def save_model(self, filepaths: List[str]) -> None:
         """
         Save a PyTorch models state_dict to disk.
         
@@ -298,7 +372,6 @@ class PDDGradientAggregation:
         for final_model, filepath in zip(self.final_models, filepaths):
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
             torch.save(final_model, filepath)
-        print("[Distillator]:") 
         print(f"     - models saved to {filepaths}")
 
     def save_distilled(self, filepath: str) -> None:
@@ -323,7 +396,6 @@ class PDDGradientAggregation:
             'inner_lrs':       self.inner_lrs.detach().cpu(),
         }
         torch.save(data, filepath)
-        print("[Distillator]:") 
         print(f"     - distilled dataset & history saved to {filepath}")
     
     def plot_meta_losses(self):

@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset, Subset
 from torchvision import transforms
 from torchvision.datasets import MNIST, CIFAR10
-from models.Model import ConvNet, ResNet10, ResNet18, VGG11
+from Models.model import ConvNet, ResNet10, ResNet18, VGG11
 import random
 
 # Command-line args
