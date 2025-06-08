@@ -211,6 +211,19 @@ class PDD:
                 x_real, y_real = x_real.to(self.device), y_real.to(self.device)
                 logits_real = functional_call(net, params, (x_real))
                 meta_loss = F.cross_entropy(logits_real, y_real) * 50000
+
+                #    so that each real sample is paired with a synthetic of the same class
+                n_real = x_real.size(0)
+                # draw a random offset [0,ipc) for *each* real sample
+                offsets = torch.randint(0, self.ipc, (n_real,), device=self.device)
+                # compute indices into X: if y_real[i] == c, idx = c*ipc + offsets[i]
+                syn_indices = y_real * self.ipc + offsets
+                x_syn_pair  = X[syn_indices]                 # shape [n_real, C, H, W]
+                # L2 penalty on *every* pixel
+                recon_loss   = F.mse_loss(x_syn_pair, x_real)
+                lambda_recon = 0.2                            # tune this weight to taste
+                meta_loss   += lambda_recon * recon_loss
+
                 stage_losses.append(meta_loss.item())
 
                 # Update synthetic X
@@ -245,6 +258,7 @@ class PDD:
             if self.debug: 
                 for c in range(10):
                     x_r, y_r = sample_class(dataset, c, 16)
+                    x_r, y_r = x_r.to(self.device), y_r.to(self.device)
                     loss_c = F.cross_entropy(net(x_r), y_r)
                     print(f"Stage {stage}, class {c}, loss {loss_c:.3f}")
                     
