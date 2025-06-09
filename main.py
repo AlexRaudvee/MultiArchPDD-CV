@@ -3,6 +3,8 @@
 import os
 import argparse
 import torch
+import random
+import time
 
 from PIL import Image
 
@@ -15,7 +17,6 @@ from torch.utils.data import DataLoader, TensorDataset, Subset
 from torchvision import transforms
 from torchvision.datasets import MNIST, CIFAR10
 from Models.model import ConvNet, ResNet10, ResNet18, VGG11, LeNet5
-import random
 import torch.nn.functional as F
 
 
@@ -36,11 +37,15 @@ def cmd_mmm(args):
                    lr_model=args.lr_model,
                    lr_syn_data=args.lr_syn_data,
                    syn_optimizer=args.syn_optimizer,
+                   regularisation=args.regularisation,
                    inner_optimizer=args.inner_optimizer,
                    debug=args.debug)
     
     print("[Distillator]:")
+    start = time.time()
     X_syn, Y_syn = pdd.distill()
+    end = time.time()
+    print(f"     - Distilled time = {end - start:.2f} seconds")
     
     print("     - Saving...")
     pdd.plot_meta_losses()
@@ -86,12 +91,16 @@ def cmd_ga(args):
                    P=args.P, K=args.K, T=args.T,
                    lr_model=args.lr_model,
                    lr_syn_data=args.lr_syn_data,
+                   regularisation=args.regularisation,
                    syn_optimizer=args.syn_optimizer,
                    inner_optimizer=args.inner_optimizer, 
                    debug=args.debug)
     
     print("[Distillator]:")
+    start = time.time()
     X_syn, Y_syn = pdd.distill()
+    end = time.time()
+    print(f"     - Distilled time = {end - start:.2f} seconds")
     
     print("     - Saving...")
     pdd.plot_meta_losses()
@@ -136,12 +145,16 @@ def cmd_cl(args):
                    P=args.P, K=args.K, T=args.T,
                    lr_model=args.lr_model,
                    lr_syn_data=args.lr_syn_data,
+                   regularisation=args.regularisation,
                    syn_optimizer=args.syn_optimizer,
                    inner_optimizer=args.inner_optimizer, 
                    debug=args.debug)
     
     print("[Distillator]:")
+    start = time.time()
     X_syn, Y_syn = pdd.distill()
+    end = time.time()
+    print(f"     - Distilled time = {end - start:.2f} seconds")
     
     print("     - Saving...")
     pdd.plot_meta_losses()
@@ -185,12 +198,16 @@ def cmd_mb(args):
                    P=args.P, K=args.K, T=args.T,
                    lr_model=args.lr_model,
                    lr_syn_data=args.lr_syn_data,
+                   regularisation=args.regularisation,
                    syn_optimizer=args.syn_optimizer,
                    inner_optimizer=args.inner_optimizer, 
                    debug=args.debug)
     
     print("[Distillator]:")
+    start = time.time()
     X_syn, Y_syn = pdd.distill()
+    end = time.time()
+    print(f"     - Distilled time = {end - start:.2f} seconds")
     
     print("     - Saving...")
     pdd.plot_meta_losses()
@@ -361,6 +378,7 @@ def main():
     p.add_argument("--T",               type=int, default=2,  help="inner-loop iterations")
     p.add_argument("--lr-model",        type=float, default=1e-3)
     p.add_argument("--lr-syn-data",     type=float, default=5e-2)
+    p.add_argument("--regularisation",  type=float, default=5e-3)
     p.add_argument("--syn-optimizer",   choices=["adam","momentum"], default="adam")
     p.add_argument("--inner-optimizer", choices=["momentum","sgd"], default="momentum")
     p.add_argument('--debug',           type=str2bool, default=False, help="Whether to enable foo (must be True or False).")
@@ -380,6 +398,7 @@ def main():
     p.add_argument("--T",               type=int, default=2,  help="inner-loop iterations")
     p.add_argument("--lr-model",        type=float, default=1e-3)
     p.add_argument("--lr-syn-data",     type=float, default=5e-2)
+    p.add_argument("--regularisation",  type=float, default=5e-3)
     p.add_argument("--syn-optimizer",   choices=["adam","momentum"], default="adam")
     p.add_argument("--inner-optimizer", choices=["momentum","sgd"], default="momentum")
     p.add_argument('--debug',           type=str2bool, default=False, help="Whether to enable foo (must be True or False).")
@@ -399,6 +418,7 @@ def main():
     p.add_argument("--T",               type=int, default=2,  help="inner-loop iterations")
     p.add_argument("--lr-model",        type=float, default=1e-3)
     p.add_argument("--lr-syn-data",     type=float, default=5e-2)
+    p.add_argument("--regularisation",  type=float, default=5e-3)
     p.add_argument("--syn-optimizer",   choices=["adam","momentum"], default="adam")
     p.add_argument("--inner-optimizer", choices=["momentum","sgd"], default="momentum")
     p.add_argument('--debug',           type=str2bool, default=False, help="Whether to enable foo (must be True or False).")
@@ -418,6 +438,7 @@ def main():
     p.add_argument("--T",               type=int, default=2,  help="inner-loop iterations")
     p.add_argument("--lr-model",        type=float, default=1e-3)
     p.add_argument("--lr-syn-data",     type=float, default=5e-2)
+    p.add_argument("--regularisation",  type=float, default=5e-3)
     p.add_argument("--syn-optimizer",   choices=["adam","momentum"], default="adam")
     p.add_argument("--inner-optimizer", choices=["momentum","sgd"], default="momentum")
     p.add_argument('--debug',           type=str2bool, default=False, help="Whether to enable foo (must be True or False).")

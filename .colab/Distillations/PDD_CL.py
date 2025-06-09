@@ -56,7 +56,9 @@ class PDDCompositeLoss:
         T,
         lr_model,
         lr_syn_data,
-        composite_weights,
+        regularisation=0.0001,
+        warmup_epochs=10,
+        composite_weights=[0.5, 0.5],
         syn_optimizer="adam",
         syn_momentum=0.9,
         inner_optimizer="sgd",
@@ -64,9 +66,7 @@ class PDDCompositeLoss:
         inner_betas=(0.9, 0.999),
         inner_eps=1e-8,
         debug=False,
-        device=None,
-        z_init_std=0.05,
-        m=1
+        device=None
     ):
         self.model_fns           = model_fns
         self.real_loader        = real_loader
@@ -78,6 +78,8 @@ class PDDCompositeLoss:
         self.T                  = T
         self.lr_model           = lr_model
         self.lr_syn_data        = lr_syn_data
+        self.regularisation     = regularisation
+        self.warmup_epochs      = warmup_epochs
         self.composite_weights  = composite_weights
         self.syn_optimizer      = syn_optimizer.lower()
         self.syn_momentum       = syn_momentum
@@ -87,10 +89,8 @@ class PDDCompositeLoss:
         self.inner_eps          = inner_eps
         self.device             = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.debug              = debug
-        self.warmup_steps       = 5
         self.smooth_kernel      = 1
-        self.z_init_std         = z_init_std
-        self.m_per_class        = m
+        self.m_per_class        = ipc
 
         # storage for monitoring
         self.synthetic_size = ipc * num_classes
@@ -221,8 +221,17 @@ class PDDCompositeLoss:
                 x_real, y_real = x_real.to(self.device), y_real.to(self.device)
                 logitss_real = [functional_call(net, params, (x_real)) for net, params in zip(nets, paramss)]
                 
-                meta_losses = [F.cross_entropy(logits_real, y_real) * 50000 for logits_real in logitss_real]
-
+                #    so that each real sample is paired with a synthetic of the same class
+                n_real = x_real.size(0)
+                # draw a random offset [0,ipc) for *each* real sample
+                offsets = torch.randint(0, self.ipc, (n_real,), device=self.device)
+                # compute indices into X: if y_real[i] == c, idx = c*ipc + offsets[i]
+                syn_indices = y_real * self.ipc + offsets
+                x_syn_pair  = X[syn_indices]                 # shape [n_real, C, H, W]
+                # L2 penalty on *every* pixel
+                recon_loss   = F.mse_loss(x_syn_pair, x_real)
+                meta_losses = [F.cross_entropy(logits_real, y_real) + self.regularisation * recon_loss for logits_real in logitss_real]
+                
                 w = torch.tensor(self.composite_weights, device=meta_losses[0].device, dtype=meta_losses[0].dtype)
                 composite_loss = (torch.stack(meta_losses) * w).sum()
                 
@@ -252,7 +261,7 @@ class PDDCompositeLoss:
                 opt_inner = SGD(net.parameters(), lr=self.lr_model, momentum=0.9)
                 union_X = torch.cat(self.S_X, dim=0)
                 union_Y = torch.cat(self.S_Y, dim=0)
-                for _ in range(self.T):
+                for _ in range(self.warmup_epochs):
                     logits_all = net(union_X)
                     loss_all = F.cross_entropy(logits_all, union_Y)
                     opt_inner.zero_grad(); loss_all.backward(); opt_inner.step()

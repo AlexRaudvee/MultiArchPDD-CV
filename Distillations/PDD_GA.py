@@ -57,6 +57,8 @@ class PDDGradientAggregation:
         T,
         lr_model,
         lr_syn_data,
+        regularisation=0.0001,
+        warmup_epochs=10,
         syn_optimizer="adam",
         syn_momentum=0.9,
         inner_optimizer="sgd",
@@ -77,6 +79,8 @@ class PDDGradientAggregation:
         self.T                  = T
         self.lr_model           = lr_model
         self.lr_syn_data        = lr_syn_data
+        self.regularisation     = regularisation
+        self.warmup_epochs      = warmup_epochs
         self.syn_optimizer      = syn_optimizer.lower()
         self.syn_momentum       = syn_momentum
         self.inner_optimizer    = inner_optimizer.lower()
@@ -88,7 +92,7 @@ class PDDGradientAggregation:
         self.warmup_steps       = 5
         self.smooth_kernel      = 1
         self.z_init_std         = z_init_std
-        self.m_per_class        = 2
+        self.m_per_class        = ipc
 
         # storage for monitoring
         self.synthetic_size = ipc * num_classes
@@ -220,7 +224,19 @@ class PDDGradientAggregation:
                 x_real, y_real = x_real.to(self.device), y_real.to(self.device)
                 logitss_real = [functional_call(net, params, (x_real)) 
                                 for net, params in zip(nets, paramss)]
-                meta_losses = [F.cross_entropy(logits_real, y_real) * 50000 for logits_real in logitss_real]
+                
+                #    so that each real sample is paired with a synthetic of the same class
+                n_real = x_real.size(0)
+                # draw a random offset [0,ipc) for *each* real sample
+                offsets = torch.randint(0, self.ipc, (n_real,), device=self.device)
+                # compute indices into X: if y_real[i] == c, idx = c*ipc + offsets[i]
+                syn_indices = y_real * self.ipc + offsets
+                x_syn_pair  = X[syn_indices]                 # shape [n_real, C, H, W]
+                # L2 penalty on *every* pixel
+                recon_loss   = F.mse_loss(x_syn_pair, x_real)
+                
+                meta_losses = [F.cross_entropy(logits_real, y_real) + self.regularisation * recon_loss for logits_real in logitss_real]
+                
                 grad = torch.autograd.grad(outputs=meta_losses, inputs=(X,), grad_outputs=[torch.tensor(1/len(self.model_fns), dtype=X.dtype)]*len(self.model_fns))[0]
                 
                 for i, stage_loss in enumerate(stage_lossess):
@@ -250,7 +266,7 @@ class PDDGradientAggregation:
             for net, theta_0 in zip(nets, theta_0s):
                 net.load_state_dict(theta_0)
                 opt_inner = SGD(net.parameters(), lr=self.lr_model, momentum=0.9)
-                for _ in range(self.T):
+                for _ in range(self.warmup_epochs):
                     logits_all = net(union_X)
                     loss_all = F.cross_entropy(logits_all, union_Y)
                     opt_inner.zero_grad(); loss_all.backward(); opt_inner.step()

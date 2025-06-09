@@ -55,6 +55,8 @@ class PDD:
         T,
         lr_model,
         lr_syn_data,
+        regularisation=5e-3,
+        warmup_epochs=10,
         syn_optimizer="adam",
         syn_momentum=0.9,
         inner_optimizer="sgd",
@@ -62,8 +64,7 @@ class PDD:
         inner_betas=(0.9, 0.999),
         inner_eps=1e-8,
         debug=False,
-        device=None,
-        z_init_std=0.05
+        device=None
     ):
         self.model_fn           = model_fn
         self.real_loader        = real_loader
@@ -75,6 +76,8 @@ class PDD:
         self.T                  = T
         self.lr_model           = lr_model
         self.lr_syn_data        = lr_syn_data
+        self.regularisation     = regularisation
+        self.warmup_epochs      = warmup_epochs
         self.syn_optimizer      = syn_optimizer.lower()
         self.syn_momentum       = syn_momentum
         self.inner_optimizer    = inner_optimizer.lower()
@@ -83,10 +86,8 @@ class PDD:
         self.inner_eps          = inner_eps
         self.device             = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.debug              = debug
-        self.warmup_steps       = 5
         self.smooth_kernel      = 1
-        self.z_init_std         = z_init_std
-        self.m_per_class        = 1
+        self.m_per_class        = ipc
 
         # storage for monitoring
         self.synthetic_size = ipc * num_classes
@@ -210,7 +211,6 @@ class PDD:
                     x_real, y_real = next(real_iter)
                 x_real, y_real = x_real.to(self.device), y_real.to(self.device)
                 logits_real = functional_call(net, params, (x_real))
-                meta_loss = F.cross_entropy(logits_real, y_real) * 50000
 
                 #    so that each real sample is paired with a synthetic of the same class
                 n_real = x_real.size(0)
@@ -221,8 +221,7 @@ class PDD:
                 x_syn_pair  = X[syn_indices]                 # shape [n_real, C, H, W]
                 # L2 penalty on *every* pixel
                 recon_loss   = F.mse_loss(x_syn_pair, x_real)
-                lambda_recon = 0.2                            # tune this weight to taste
-                meta_loss   += lambda_recon * recon_loss
+                meta_loss = F.cross_entropy(logits_real, y_real) * 1000 + self.regularisation * recon_loss
 
                 stage_losses.append(meta_loss.item())
 
@@ -248,7 +247,7 @@ class PDD:
             opt_inner = SGD(net.parameters(), lr=self.lr_model, momentum=0.9)
             union_X = torch.cat(self.S_X, dim=0)
             union_Y = torch.cat(self.S_Y, dim=0)
-            for _ in range(self.T):
+            for _ in range(self.warmup_epochs):
                 logits_all = net(union_X)
                 loss_all = F.cross_entropy(logits_all, union_Y)
                 opt_inner.zero_grad(); loss_all.backward(); opt_inner.step()

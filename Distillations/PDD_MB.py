@@ -57,6 +57,8 @@ class PDDMultiBranch:
         T,
         lr_model,
         lr_syn_data,
+        regularisation=0.0001,
+        warmup_epochs=10,
         syn_optimizer="adam",
         syn_momentum=0.9,
         inner_optimizer="sgd",
@@ -65,7 +67,6 @@ class PDDMultiBranch:
         inner_eps=1e-8,
         debug=False,
         device=None,
-        z_init_std=0.05
     ):
         self.model_fns          = model_fns
         self.real_loader        = real_loader
@@ -77,6 +78,8 @@ class PDDMultiBranch:
         self.T                  = T
         self.lr_model           = lr_model
         self.lr_syn_data        = lr_syn_data
+        self.regularisation     = regularisation
+        self.warmup_epochs      = warmup_epochs
         self.syn_optimizer      = syn_optimizer.lower()
         self.syn_momentum       = syn_momentum
         self.inner_optimizer    = inner_optimizer.lower()
@@ -85,10 +88,8 @@ class PDDMultiBranch:
         self.inner_eps          = inner_eps
         self.device             = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.debug              = debug
-        self.warmup_steps       = 5
         self.smooth_kernel      = 1
-        self.z_init_std         = z_init_std
-        self.m_per_class        = 2
+        self.m_per_class        = ipc
 
         # storage for monitoring
         self.synthetic_size = ipc * num_classes
@@ -274,8 +275,21 @@ class PDDMultiBranch:
                     x_real, y_real = next(real_iter)
                 x_real, y_real = x_real.to(self.device), y_real.to(self.device)
                 logitss_real = [functional_call(net, params, (x_real)) for net, params in zip(nets, paramss)]
-                _meta_losses = [F.cross_entropy(logits_real, y_real) * 50000 for logits_real in logitss_real]
+                #    so that each real sample is paired with a synthetic of the same class
+                n_real = x_real.size(0)
+                # draw a random offset [0,ipc) for *each* real sample
+                offsets = torch.randint(0, self.ipc, (n_real,), device=self.device)
+                # compute indices into X: if y_real[i] == c, idx = c*ipc + offsets[i]
+                syn_indices = y_real * self.ipc + offsets
                 
+                recon_loss = 0
+                for X in Xs:
+                    x_syn_pair  = X[syn_indices]                 # shape [n_real, C, H, W]
+                    # L2 penalty on *every* pixel
+                    recon_loss += F.mse_loss(x_syn_pair, x_real)
+                recon_loss = recon_loss / len(Xs)
+                _meta_losses = [F.cross_entropy(logits_real, y_real) + self.regularisation * recon_loss for logits_real in logitss_real]
+                                
                 # compute consistency loss
                 cons_loss = self._consistency_loss(Xs, Ys, lam=0.1)
                 
@@ -314,7 +328,7 @@ class PDDMultiBranch:
                 net.load_state_dict(theta_0)
                 opt_inner = SGD(net.parameters(), lr=self.lr_model, momentum=0.9) if self.inner_optimizer == "momentum" \
                     else Adam(net.params(), lr=self.lr_model)
-                for _ in range(self.T):
+                for _ in range(self.warmup_epochs):
                     logits_all = net(union_X)
                     loss_all = F.cross_entropy(logits_all, union_Y)
                     opt_inner.zero_grad(); loss_all.backward(); opt_inner.step()
