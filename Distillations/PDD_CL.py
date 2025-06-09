@@ -268,11 +268,13 @@ class PDDCompositeLoss:
 
                 theta_0s[i] = net.state_dict()
 
-                if self.debug: 
+            if self.debug: 
+                for i, net in enumerate(nets):
                     for c in range(10):
                         x_r, y_r = sample_class(dataset, c, 16)
+                        x_r, y_r = x_r.to(self.device), y_r.to(self.device)
                         loss_c = F.cross_entropy(net(x_r), y_r)
-                        print(f"     - Stage {stage}, class {c}, loss {loss_c:.3f}")
+                        print(f"     - Model {i+1}: Stage {stage}, class {c}, loss {loss_c:.3f}")
                         
         self.final_models = theta_0s
         return self.S_X, self.S_Y

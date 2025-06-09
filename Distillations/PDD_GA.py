@@ -274,10 +274,12 @@ class PDDGradientAggregation:
             theta_0s = [net.state_dict() for net in nets]
 
             if self.debug: 
-                for c in range(10):
-                    x_r, y_r = sample_class(dataset, c, 16)
-                    losses_c = [F.cross_entropy(net(x_r), y_r) for net in nets]
-                    print(f"Stage {stage}, class {c}, losses {losses_c}")
+                for i, net in enumerate(nets):
+                    for c in range(10):
+                        x_r, y_r = sample_class(dataset, c, 16)
+                        x_r, y_r = x_r.to(self.device), y_r.to(self.device)
+                        loss_c = F.cross_entropy(net(x_r), y_r)
+                        print(f"     - Model {i+1}: Stage {stage}, class {c}, loss {loss_c:.3f}")
                     
         self.final_models = [theta_0 for theta_0 in theta_0s]
         return self.S_X, self.S_Y
