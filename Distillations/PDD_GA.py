@@ -89,9 +89,7 @@ class PDDGradientAggregation:
         self.inner_eps          = inner_eps
         self.device             = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.debug              = debug
-        self.warmup_steps       = 5
         self.smooth_kernel      = 1
-        self.z_init_std         = z_init_std
         self.m_per_class        = ipc
 
         # storage for monitoring
@@ -237,13 +235,13 @@ class PDDGradientAggregation:
                 
                 meta_losses = [F.cross_entropy(logits_real, y_real) + self.regularisation * recon_loss for logits_real in logitss_real]
                 
-                grad = torch.autograd.grad(outputs=meta_losses, inputs=(X,), grad_outputs=[torch.tensor(1/len(self.model_fns), dtype=X.dtype)]*len(self.model_fns))[0]
-                
+                meta_loss = torch.stack(meta_losses).mean()
+
                 for i, stage_loss in enumerate(stage_lossess):
                     stage_loss.append(meta_losses[i].item())
 
                 # Update synthetic X
-                syn_opt.zero_grad(); X.grad = grad
+                syn_opt.zero_grad(); meta_loss.backward()
                 
                 if self.debug:
                     print(f"K Losses    ={meta_losses}")
@@ -252,6 +250,7 @@ class PDDGradientAggregation:
                         
                     if k % 20 == 0:
                         self.plot_images(X, self.ipc)
+                      
                 syn_opt.step()
                 
             # Save results

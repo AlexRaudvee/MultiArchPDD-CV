@@ -44,11 +44,10 @@ class ConvNet(nn.Module):
 from torchvision.models.resnet import ResNet, BasicBlock
 
 class ResNet10(ResNet):
-    def __init__(self, in_channels=3, num_classes=10):
+    def __init__(self, in_channels=1, num_classes=10):
         super().__init__(BasicBlock, [1,1,1,1], num_classes=num_classes)
-        # adapt first conv if needed
-        if in_channels != 3:
-            self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        self.maxpool = nn.Identity()
 
 
 # ResNet-18: use torchvision’s implementation
