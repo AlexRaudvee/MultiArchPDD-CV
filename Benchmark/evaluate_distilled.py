@@ -1,17 +1,14 @@
-import os
-import torch
 import numpy as np
 from scipy import linalg
-from torchvision import datasets, transforms
-from torchvision.models import inception_v3
-from torchvision.models.feature_extraction import create_feature_extractor
-from torch.utils.data import DataLoader, SubsetRandomSampler
-from torchvision.datasets import CIFAR10
+
+import torch
 import torch.nn.functional as F
 
-# -----------------------------------------------------------------------------
-# 1. Utility to load distilled checkpoints in your format
-# -----------------------------------------------------------------------------
+from torchvision.datasets import CIFAR10
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader, SubsetRandomSampler
+from torchvision.models.feature_extraction import create_feature_extractor
+
 
 def load_distilled(filepath, device='cpu'):
     """
@@ -25,10 +22,6 @@ def load_distilled(filepath, device='cpu'):
     Y_list = [y.to(device) for y in data['Y']]
     return list(zip(X_list, Y_list))
 
-
-# -----------------------------------------------------------------------------
-# 2. Prepare real MNIST loader (grayscale → 3-channel, resize to 299×299)
-# -----------------------------------------------------------------------------
 
 def get_real_mnist_loader(batch_size=64, num_workers=0, real_subset_size=10000):
     tf = transforms.Compose([
@@ -81,10 +74,6 @@ norm3 = transforms.Normalize(mean=[0.5,0.5,0.5],
                              std =[0.5,0.5,0.5])
 
 
-# -----------------------------------------------------------------------------
-# 3. Feature extractor from pretrained Inception-V3
-# -----------------------------------------------------------------------------
-
 def get_inception_feature_extractor(device='cpu'):
     from torchvision.models import inception_v3, Inception_V3_Weights
     model = inception_v3(weights=Inception_V3_Weights.DEFAULT,
@@ -95,10 +84,6 @@ def get_inception_feature_extractor(device='cpu'):
     # extract the pooled 2048-d vector before the final fc
     return create_feature_extractor(model, return_nodes={'avgpool': 'feat'}).to(device)
 
-
-# -----------------------------------------------------------------------------
-# 4. Compute activations for a dataset
-# -----------------------------------------------------------------------------
 
 @torch.no_grad()
 def compute_activations(dataloader, feat_extractor, device='cpu'):
@@ -122,10 +107,6 @@ def compute_activations(dataloader, feat_extractor, device='cpu'):
     return np.concatenate(feats, axis=0)
 
 
-# -----------------------------------------------------------------------------
-# 5. FID / Frechet Distance
-# -----------------------------------------------------------------------------
-
 def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
     """Numpy implementation of the Frechet distance."""
     diff = mu1 - mu2
@@ -145,10 +126,6 @@ def compute_statistics(feats):
     sigma = np.cov(feats, rowvar=False)
     return mu, sigma
 
-
-# -----------------------------------------------------------------------------
-# 6. MMD with Gaussian kernel
-# -----------------------------------------------------------------------------
 
 def gaussian_kernel(x, y, sigma):
     """Compute Gaussian (RBF) kernel matrix between x and y."""
@@ -178,10 +155,6 @@ def calculate_mmd(feats1, feats2, sigma=None):
     sum_xy = K_xy.sum() / (n * m)
     return sum_xx + sum_yy - 2 * sum_xy
 
-
-# -----------------------------------------------------------------------------
-# 7. Putting it all together
-# -----------------------------------------------------------------------------
 
 def evaluate_distillation(distilled_path,
                            dataset='mnist',
