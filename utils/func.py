@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 
 import torch.utils.data.dataloader
 
-from typing import Sequence
+from typing import Sequence, Optional
 from torch.utils.data import Subset, DataLoader
 from Dataloader.dataset import CustomDataset
 
@@ -162,10 +162,13 @@ def show_pdd_synthetic(
     stages_to_plot: Sequence[int],
     ipc: int,
     figsize_per_image: float = 2.0,
-    cmap: str = None
+    cmap: Optional[str] = None,
+    class_names: Optional[Sequence[str]] = None,
 ):
     """
-    Visualize selected stages of a PDD distilled dataset.
+    Visualize selected stages of a PDD distilled dataset without normalization, and
+    label each row with its corresponding stage number. Optionally display custom
+    class names along the top instead of numeric labels.
 
     Args:
         X_stages: list of Tensors, each [N, C, H, W] for stage i.
@@ -174,6 +177,7 @@ def show_pdd_synthetic(
         ipc: images per class in each stage.
         figsize_per_image: size multiplier per image.
         cmap: matplotlib colormap (e.g. 'gray') or None.
+        class_names: optional list of length num_classes to use as column titles.
     """
     # sanity checks
     assert len(X_stages) == len(Y_stages), "Need X and Y for every stage"
@@ -186,65 +190,67 @@ def show_pdd_synthetic(
         y0 = y0.argmax(dim=1)
     num_classes = int(y0.max().item() + 1)
 
+    # verify class_names length if provided
+    if class_names is not None:
+        assert len(class_names) == num_classes, \
+            f"class_names must have length {num_classes}"
+
     # grid size
     n_rows = num_display * ipc
     n_cols = num_classes
 
-    # create figure
+    # create figure and axes
     fig, axes = plt.subplots(
         n_rows, n_cols,
         figsize=(n_cols * figsize_per_image, n_rows * figsize_per_image),
         squeeze=False
     )
 
-    # column titles
-    for c in range(num_classes):
-        axes[0][c].set_title(str(c), fontsize=18)
+    # column titles: either names or numeric
+    titles = class_names if class_names is not None else [str(c) for c in range(num_classes)]
+    for c, title in enumerate(titles):
+        axes[0][c].set_title(title, fontsize=24)
 
-    # plot
+    # plot images and add row labels
     for plot_i, stage in enumerate(stages_to_plot):
         X = X_stages[stage]
         Y = Y_stages[stage]
-        # flatten labels if one-hot
         if Y.ndim == 2:
             y = Y.argmax(dim=1)
         else:
             y = Y.flatten().long()
 
-        # for each class c, pick the first `ipc` examples
-        # assume X ordered by repeating classes; otherwise gather by mask
         for c in range(num_classes):
-            idxs = (y == c).nonzero(as_tuple=True)[0].tolist()
-            # only keep up to ipc
-            idxs = idxs[:ipc]
+            # indices of class c, up to ipc
+            idxs = (y == c).nonzero(as_tuple=True)[0].tolist()[:ipc]
             for j, idx in enumerate(idxs):
                 row = plot_i * ipc + j
                 ax = axes[row][c]
-                ax.axis("off")
+                ax.axis('off')
+                img = X[idx].detach().cpu().permute(1, 2, 0).numpy()
+                if img.ndim == 3 and img.shape[-1] == 1:
+                    img = img.squeeze(-1)
+                # display raw pixel values (no normalization)
+                ax.imshow(img, cmap=cmap)
 
-                img = X[idx]
-                img_np = img.detach().cpu().permute(1, 2, 0).numpy()
-                if img_np.shape[-1] == 1:
-                    img_np = img_np.squeeze(-1)
-                ax.imshow(img_np, cmap=cmap)
-
-            # any extra slots hide
+            # hide extra slots
             for j in range(len(idxs), ipc):
                 row = plot_i * ipc + j
-                axes[row][c].axis("off")
+                axes[row][c].axis('off')
 
-        # add a single y-label for this stage, centered over its ipc rows
-        row_start = plot_i * ipc
-        row_mid   = row_start + ipc // 2
-        axes[row_mid][0].set_ylabel(
-            f"Stage {stage+1}",    # +1 if you want 1-based
-            rotation=0,
-            labelpad=50,
-            va="center",
-            fontsize=12
-        )
+        # annotate each synthetic row with the stage label
+        for j in range(ipc):
+            row = plot_i * ipc + j
+            ax = axes[row][0]
+            ax.text(
+                -0.3, 0.5,
+                f"Stage {stage+1}",
+                va='center', ha='right',
+                transform=ax.transAxes,
+                fontsize=24
+            )
 
-    # plt.tight_layout()
+    plt.tight_layout()
     plt.show()
 
 
