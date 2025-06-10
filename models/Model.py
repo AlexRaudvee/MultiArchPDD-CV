@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import vgg11, resnet18
+from torchvision.models import vgg11, resnet18, VGG
 from torch.hub import load_state_dict_from_url
 from collections import OrderedDict
 
@@ -65,26 +65,52 @@ class ResNet18(nn.Module):
 
 # VGG11: from torchvision, adjust for input channels
 class VGG11(nn.Module):
-    def __init__(self, in_channels=3, num_classes=10):
+    """
+    Simplified VGG-like network for low-res inputs (e.g., 28×28 MNIST or 32×32 CIFAR).
+    Uses BatchNorm, fewer channels, and three pooling stages to ensure a 1×1 feature map.
+    """
+    def __init__(self, in_channels: int = 1, num_classes: int = 10):
         super().__init__()
-        self.model = vgg11(pretrained=False)
-        # patch first conv
-        if in_channels != 3:
-            cfg = self.model.features
-            first = cfg[0]
-            cfg[0] = nn.Conv2d(in_channels, first.out_channels,
-                               kernel_size=first.kernel_size,
-                               padding=first.padding)
-        # patch classifier
-        self.model.classifier[6] = nn.Linear(4096, num_classes)
+        # Feature extractor: 6 conv layers, 3 max-pools
+        self.features = nn.Sequential(
+            # block1: 28→14
+            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32), nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32), nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # block2: 14→7
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64), nn.ReLU(inplace=True),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64), nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # block3: 7→3
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128), nn.ReLU(inplace=True),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128), nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+        # Global avgpool to 1x1
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
-    def forward(self, x):
-        return self.model(x)
+        # Classifier: compact two-layer head
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128, 128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=0.5),
+            nn.Linear(128, num_classes)
+        )
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = self.avgpool(x)
+        x = self.classifier(x)
+        return x
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+    
 
 class LeNet5(nn.Module):
     """
